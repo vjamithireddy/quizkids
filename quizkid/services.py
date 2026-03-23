@@ -22,6 +22,34 @@ SUPPORTED_MIME_TYPES = {
 
 TEXT_MIME_TYPES = {"text/plain"}
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "in",
+    "into",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "their",
+    "them",
+    "they",
+    "this",
+    "to",
+    "we",
+    "with",
+}
 
 
 def utcnow() -> str:
@@ -646,14 +674,6 @@ def _concept_title_from_sentence(sentence: str) -> str:
     return " ".join(words[:6]) if words else "Concept"
 
 
-def _build_question_prompt(topic_name: str, concept_title: str, explanation: str) -> str:
-    subject = concept_title.strip() or topic_name.strip() or "this concept"
-    lowered = explanation.lower()
-    if " is " in lowered or " are " in lowered:
-        return f"Which statement is correct about {subject}?"
-    return f"Which idea best matches {subject} in {topic_name}?"
-
-
 def _pick_distractors(explanations: list[str], current_index: int) -> list[str]:
     distractors = [text for idx, text in enumerate(explanations) if idx != current_index]
     filler = [
@@ -666,6 +686,116 @@ def _pick_distractors(explanations: list[str], current_index: int) -> list[str]:
             break
         distractors.append(item)
     return distractors[:3]
+
+
+def _important_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for word in re.findall(r"[A-Za-z0-9'-]+", text):
+        lowered = word.lower()
+        if lowered in STOPWORDS or len(lowered) <= 2:
+            continue
+        if lowered not in seen:
+            seen.add(lowered)
+            terms.append(word)
+    return terms
+
+
+def _pick_blank_term(explanation: str) -> str | None:
+    terms = _important_terms(explanation)
+    if not terms:
+        return None
+    terms.sort(key=lambda term: (-len(term), explanation.lower().find(term.lower())))
+    return terms[0]
+
+
+def _blank_prompt(explanation: str, blank_term: str) -> str:
+    pattern = re.compile(rf"\b{re.escape(blank_term)}\b", re.IGNORECASE)
+    cloze = pattern.sub("____", explanation, count=1)
+    if cloze == explanation:
+        return f"Fill in the blank: ____ is the missing key word in this lesson idea: {explanation}"
+    return f"Fill in the blank: {cloze}"
+
+
+def _blank_choices(blank_term: str, peer_explanations: list[str]) -> list[str]:
+    choices = [blank_term]
+    seen = {blank_term.lower()}
+    for explanation in peer_explanations:
+        for term in _important_terms(explanation):
+            lowered = term.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            choices.append(term)
+            if len(choices) == 4:
+                return choices
+    filler = ["number", "value", "shape", "pattern", "rule"]
+    for term in filler:
+        if term not in seen:
+            choices.append(term)
+            seen.add(term)
+        if len(choices) == 4:
+            break
+    return choices[:4]
+
+
+def _preview_sentence(text: str, max_words: int = 10) -> str:
+    words = text.rstrip(".!?").split()
+    return " ".join(words[:max_words])
+
+
+def _build_question_set(
+    topic_name: str,
+    concept_title: str,
+    explanation: str,
+    peer_explanations: list[str],
+) -> list[dict[str, object]]:
+    distractors = _pick_distractors([explanation, *peer_explanations], 0)
+    concept_label = concept_title.strip() or topic_name.strip() or "this concept"
+    questions: list[dict[str, object]] = [
+        {
+            "prompt": f"Which statement best explains {concept_label}?",
+            "choices": [explanation, *distractors[:3]],
+            "correct_choice": "A",
+            "difficulty_level": 1,
+            "variant_suffix": "core",
+            "explanation": f"{concept_label} is explained by the lesson statement shown in the correct answer.",
+            "hint_text": f"Look for the idea that directly teaches what {concept_label} means.",
+        }
+    ]
+
+    blank_term = _pick_blank_term(explanation)
+    if blank_term:
+        blank_choices = _blank_choices(blank_term, peer_explanations)
+        if len(blank_choices) == 4:
+            questions.append(
+                {
+                    "prompt": _blank_prompt(explanation, blank_term),
+                    "choices": blank_choices,
+                    "correct_choice": "A",
+                    "difficulty_level": 3,
+                    "variant_suffix": "blank",
+                    "explanation": f"The missing word is '{blank_term}' because it completes the key lesson idea correctly.",
+                    "hint_text": f"Think about the most important word in this concept: {concept_label}.",
+                }
+            )
+
+    misconception = distractors[0] if distractors else "a different lesson note"
+    questions.append(
+        {
+            "prompt": (
+                f"A student mixes up {concept_label} with this note: "
+                f"'{_preview_sentence(misconception)}'. Which note should the student keep for {concept_label}?"
+            ),
+            "choices": [explanation, *distractors[:3]],
+            "correct_choice": "A",
+            "difficulty_level": 5,
+            "variant_suffix": "misconception",
+            "explanation": f"The correct note is the one that truly belongs to {concept_label}, not a different idea from the same topic.",
+            "hint_text": f"Compare the concept card for {concept_label} with the mixed-up note.",
+        }
+    )
+    return questions
 
 
 def extract_pdf_text(payload: bytes) -> tuple[str, str]:
@@ -771,32 +901,40 @@ def generate_content_from_material(conn: sqlite3.Connection, material_id: int, t
         generated_topics += 1
         for idx, concept_id in enumerate(concept_ids):
             explanation = explanations[idx]
-            distractors = _pick_distractors(explanations, idx)
-            choices = [explanation, *distractors]
-            prompt = _build_question_prompt(block["topic_name"], _concept_title_from_sentence(explanation), explanation)
-            difficulty = min(5, 1 + idx)
-            conn.execute(
-                """
-                INSERT INTO questions
-                    (concept_id, prompt, choice_a, choice_b, choice_c, choice_d, correct_choice, explanation, hint_text, difficulty_level, question_variant_group, review_status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-                """,
-                (
-                    concept_id,
-                    prompt,
-                    choices[0],
-                    choices[1],
-                    choices[2],
-                    choices[3],
-                    "A",
-                    f"That answer is correct because it comes directly from the lesson text for {block['topic_name']}.",
-                    f"Review the concept card for {_concept_title_from_sentence(explanation)} before answering.",
-                    difficulty,
-                    f"material-{material_id}-concept-{concept_id}",
-                    now,
-                ),
+            concept_title = _concept_title_from_sentence(explanation)
+            peer_explanations = [text for pos, text in enumerate(explanations) if pos != idx]
+            question_set = _build_question_set(
+                block["topic_name"],
+                concept_title,
+                explanation,
+                peer_explanations,
             )
-            generated_questions += 1
+            for question in question_set:
+                choices = question["choices"]
+                if len(choices) < 4:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO questions
+                        (concept_id, prompt, choice_a, choice_b, choice_c, choice_d, correct_choice, explanation, hint_text, difficulty_level, question_variant_group, review_status, active, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generated', 1, ?)
+                    """,
+                    (
+                        concept_id,
+                        question["prompt"],
+                        choices[0],
+                        choices[1],
+                        choices[2],
+                        choices[3],
+                        question["correct_choice"],
+                        question["explanation"],
+                        question["hint_text"],
+                        question["difficulty_level"],
+                        f"material-{material_id}-concept-{concept_id}-{question['variant_suffix']}",
+                        now,
+                    ),
+                )
+                generated_questions += 1
 
     if generated_topics == 0 or generated_questions < 2:
         return "quarantined", 0.25
@@ -879,15 +1017,6 @@ def set_topic_review_status(conn: sqlite3.Connection, topic_id: int, review_stat
         return False, "Topic not found."
     now = utcnow()
     conn.execute("UPDATE topics SET review_status = ? WHERE id = ?", (review_status, topic_id))
-    if review_status != "approved":
-        conn.execute(
-            """
-            UPDATE questions
-            SET review_status = 'rejected', active = 0
-            WHERE concept_id IN (SELECT id FROM concepts WHERE topic_id = ?)
-            """,
-            (topic_id,),
-        )
     conn.execute(
         """
         INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, details, created_at)
@@ -897,26 +1026,6 @@ def set_topic_review_status(conn: sqlite3.Connection, topic_id: int, review_stat
     )
     conn.commit()
     return True, f"Topic marked as {review_status}."
-
-
-def set_question_review_status(conn: sqlite3.Connection, question_id: int, review_status: str, actor_user_id: int) -> tuple[bool, str]:
-    if review_status not in {"approved", "rejected", "pending"}:
-        return False, "Unsupported review status."
-    question = conn.execute("SELECT * FROM questions WHERE id = ?", (question_id,)).fetchone()
-    if not question:
-        return False, "Question not found."
-    now = utcnow()
-    active = 1 if review_status == "approved" else 0
-    conn.execute("UPDATE questions SET review_status = ?, active = ? WHERE id = ?", (review_status, active, question_id))
-    conn.execute(
-        """
-        INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, details, created_at)
-        VALUES (?, 'review_question', 'question', ?, ?, ?)
-        """,
-        (actor_user_id, str(question_id), f"Marked question as {review_status}.", now),
-    )
-    conn.commit()
-    return True, f"Question marked as {review_status}."
 
 
 def clear_generated_content(conn: sqlite3.Connection, material_id: int) -> None:
@@ -1080,7 +1189,7 @@ def choose_questions_for_attempt(conn: sqlite3.Connection, kid_profile_id: int, 
         FROM questions
         JOIN concepts ON concepts.id = questions.concept_id
         JOIN topics ON topics.id = concepts.topic_id
-        WHERE concepts.topic_id = ? AND topics.review_status = 'approved' AND questions.active = 1 AND questions.review_status = 'approved'
+        WHERE concepts.topic_id = ? AND topics.review_status = 'approved' AND questions.active = 1
         ORDER BY ABS(questions.difficulty_level - ?) ASC, questions.id ASC
         """,
         (topic_id, skill_level),

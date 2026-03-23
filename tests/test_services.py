@@ -26,7 +26,6 @@ from quizkid.services import (
     register_parent_account,
     regenerate_material,
     recommend_next_skill,
-    set_question_review_status,
     set_topic_review_status,
     seed_demo_data,
     start_quiz_attempt,
@@ -117,6 +116,22 @@ class QuizKidServiceTests(unittest.TestCase):
         self.assertIn("Whole Numbers", topic_names)
         question_count = self.conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
         self.assertGreaterEqual(question_count, 4)
+
+    def test_generated_questions_span_multiple_skill_levels(self) -> None:
+        ok, _ = create_material(
+            self.conn,
+            1,
+            "Fractions Intro",
+            "fractions.txt",
+            "text/plain",
+            b"Fractions show equal parts of a whole.\nThe numerator counts selected parts.\nThe denominator tells how many equal parts make the whole.\nEquivalent fractions name the same amount in different ways.",
+        )
+        self.assertTrue(ok)
+        levels = {
+            row[0]
+            for row in self.conn.execute("SELECT DISTINCT difficulty_level FROM questions ORDER BY difficulty_level").fetchall()
+        }
+        self.assertTrue({1, 3, 5}.issubset(levels))
 
 
 class QuizKidProductionSetupTests(unittest.TestCase):
@@ -258,7 +273,7 @@ class QuizKidProductionSetupTests(unittest.TestCase):
         topics_after = list_topics_for_kid(self.conn, self.kid_id)
         self.assertTrue(any(row["id"] == topic["id"] for row in topics_after))
 
-    def test_question_must_be_approved_for_quiz_selection(self) -> None:
+    def test_topic_approval_publishes_generated_question_bank(self) -> None:
         create_material(
             self.conn,
             self.admin_id,
@@ -271,32 +286,11 @@ class QuizKidProductionSetupTests(unittest.TestCase):
         material_id = self.conn.execute("SELECT material_id FROM topics WHERE id = ?", (topic_id,)).fetchone()[0]
         parent_user_id = self.conn.execute("SELECT parent_user_id FROM kid_profiles WHERE id = ?", (self.kid_id,)).fetchone()[0]
         assign_courses_to_kid(self.conn, parent_user_id, self.kid_id, [material_id])
-        attempt_id = start_quiz_attempt(self.conn, self.kid_id, topic_id)
-        self.conn.execute("UPDATE topics SET review_status = 'approved' WHERE id = ?", (topic_id,))
-        self.conn.execute(
-            """
-            UPDATE questions
-            SET review_status = 'rejected', active = 0
-            WHERE concept_id IN (SELECT id FROM concepts WHERE topic_id = ?)
-            """,
-            (topic_id,),
-        )
-        self.conn.commit()
         self.assertEqual(choose_questions_for_attempt(self.conn, self.kid_id, topic_id, 2), [])
-        question_id = self.conn.execute(
-            """
-            SELECT questions.id
-            FROM questions
-            JOIN concepts ON concepts.id = questions.concept_id
-            WHERE concepts.topic_id = ?
-            LIMIT 1
-            """,
-            (topic_id,),
-        ).fetchone()[0]
-        ok, _ = set_question_review_status(self.conn, question_id, "approved", self.admin_id)
+        ok, _ = set_topic_review_status(self.conn, topic_id, "approved", self.admin_id)
         self.assertTrue(ok)
         selected = choose_questions_for_attempt(self.conn, self.kid_id, topic_id, 2)
-        self.assertEqual(len(selected), 1)
+        self.assertEqual(len(selected), 3)
 
     def test_list_assignable_and_assigned_courses(self) -> None:
         create_material(
