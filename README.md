@@ -9,6 +9,7 @@ QuizKid is a Python-first implementation of the product plan for a kids quiz and
 - quiz attempts, answer review, retakes, hints, and mastery tracking
 - admin course-material upload pipeline scaffolding with automatic generation
 - SQLite persistence using only the Python standard library
+- real PDF text extraction through `pypdf`
 
 This repository is intentionally dependency-light so it can run on a simple Hostinger VPS without assuming Node.js or external Python packages.
 
@@ -60,6 +61,7 @@ Available only when `QUIZKID_SEED_DEMO=1`:
 ## Run locally
 
 ```bash
+python3 -m pip install -r requirements.txt
 python3 run.py
 ```
 

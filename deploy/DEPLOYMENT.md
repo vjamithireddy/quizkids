@@ -27,7 +27,7 @@ chown svc_quizkid:svc_quizkid /opt/quizkid
 mkdir -p /opt/quizkid/data
 chown svc_quizkid:svc_quizkid /opt/quizkid/data
 runuser -u svc_quizkid -- git clone https://github.com/vjamithireddy/quizkids.git /opt/quizkid/app
-runuser -u svc_quizkid -- bash -lc 'cd /opt/quizkid/app && python3 -m venv .venv && .venv/bin/pip install --upgrade pip'
+runuser -u svc_quizkid -- bash -lc 'cd /opt/quizkid/app && python3 -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -r requirements.txt'
 runuser -u svc_quizkid -- bash -lc 'cd /opt/quizkid/app && cp deploy/env.production.example .env'
 ```
 
@@ -65,7 +65,7 @@ certbot certonly --nginx -d quizkid.navi-services.com
 ## Smoke checks
 
 ```bash
-curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8001/health
 curl -I http://quizkid.navi-services.com:9080/
 curl -k https://quizkid.navi-services.com:9443/health
 ```

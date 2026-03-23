@@ -2,6 +2,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from quizkid import services
 from quizkid.db import init_db
@@ -121,6 +122,32 @@ class QuizKidProductionSetupTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertTrue(Path(material["stored_file_path"]).exists())
         self.assertEqual(material["stored_file_size"], len(b"Mammals feed milk.\nBirds have feathers.\nFish live in water."))
+
+    def test_pdf_text_extraction_uses_pdf_reader_when_available(self) -> None:
+        class FakePage:
+            def __init__(self, text: str) -> None:
+                self._text = text
+
+            def extract_text(self) -> str:
+                return self._text
+
+        class FakeReader:
+            def __init__(self, stream) -> None:
+                self.pages = [FakePage("Fractions are parts of a whole."), FakePage("Equivalent fractions have the same value.")]
+
+        with patch("quizkid.services.load_pdf_reader_class", return_value=FakeReader):
+            extracted, status = services.extract_source_text("fractions.pdf", "application/pdf", b"%PDF-fake")
+
+        self.assertEqual(status, "extracted")
+        self.assertIn("Fractions are parts of a whole.", extracted)
+        self.assertIn("Equivalent fractions have the same value.", extracted)
+
+    def test_pdf_without_reader_dependency_falls_back_to_stored_status(self) -> None:
+        with patch("quizkid.services.load_pdf_reader_class", side_effect=ModuleNotFoundError):
+            extracted, status = services.extract_source_text("fractions.pdf", "application/pdf", b"%PDF-fake")
+
+        self.assertEqual(status, "stored")
+        self.assertIn("dependency is not installed", extracted)
 
 
 if __name__ == "__main__":

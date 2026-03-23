@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import importlib
+import io
 import re
 import sqlite3
-from base64 import urlsafe_b64encode
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -369,9 +370,49 @@ def validate_material_upload(filename: str, mime_type: str, payload: bytes) -> l
     return notes
 
 
+def load_pdf_reader_class():
+    module = importlib.import_module("pypdf")
+    return module.PdfReader
+
+
+def normalize_extracted_text(text: str) -> str:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.replace("\r", "\n").split("\n")]
+    lines = [line for line in lines if line]
+    return "\n".join(lines)
+
+
+def extract_pdf_text(payload: bytes) -> tuple[str, str]:
+    try:
+        reader_class = load_pdf_reader_class()
+    except ModuleNotFoundError:
+        return (
+            "PDF parsing dependency is not installed. Install requirements.txt so QuizKid can extract real PDF content.",
+            "stored",
+        )
+
+    try:
+        reader = reader_class(io.BytesIO(payload))
+        page_text = []
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            if text.strip():
+                page_text.append(text)
+        extracted = normalize_extracted_text("\n".join(page_text))
+        if not extracted:
+            return (
+                "PDF was stored, but no readable text was extracted. The file may be image-only or scanned.",
+                "stored",
+            )
+        return extracted, "extracted"
+    except Exception as exc:
+        return (f"PDF was stored, but parsing failed: {exc}", "stored")
+
+
 def extract_source_text(filename: str, mime_type: str, payload: bytes) -> tuple[str, str]:
+    if mime_type == "application/pdf":
+        return extract_pdf_text(payload)
     if mime_type in TEXT_MIME_TYPES:
-        return payload.decode("utf-8", errors="ignore"), "extracted"
+        return normalize_extracted_text(payload.decode("utf-8", errors="ignore")), "extracted"
     note = (
         f"Stored {filename} successfully, but deep parsing for {mime_type} requires an external extractor. "
         "A lightweight placeholder summary will be generated."
@@ -389,7 +430,7 @@ def store_material_upload(filename: str, payload: bytes) -> tuple[str, str, int]
 
 
 def _normalize_chunks(source_text: str) -> list[str]:
-    chunks = [chunk.strip() for chunk in source_text.replace("\r", "\n").split("\n") if chunk.strip()]
+    chunks = [chunk.strip() for chunk in normalize_extracted_text(source_text).split("\n") if chunk.strip()]
     unique: list[str] = []
     seen: set[str] = set()
     for chunk in chunks:
