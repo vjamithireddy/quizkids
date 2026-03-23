@@ -6,7 +6,7 @@ import sqlite3
 from http import cookies
 from pathlib import Path
 from typing import Callable
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote_plus
 from wsgiref.simple_server import make_server
 
 from .config import COOKIE_SECURE, SEED_DEMO_DATA
@@ -1097,7 +1097,9 @@ def app(environ: dict, start_response: Callable):
         user = require_user(conn, request, "parent")
         if not user:
             return redirect(start_response, "/")
-        title, body = parent_dashboard(conn, user)
+        flash = request.query.get("flash", "")
+        error = request.query.get("error", "")
+        title, body = parent_dashboard(conn, user, flash=flash, errors=[error] if error else None)
         return response(start_response, title, body, user)
 
     if request.path == "/parent/create-kid" and request.method == "POST":
@@ -1113,9 +1115,16 @@ def app(environ: dict, start_response: Callable):
         except ValueError:
             start_skill_level = 2
         if not errors:
-            create_kid_profile(conn, user["id"], form["display_name"], form.get("age_band", "Ages 8-10"), start_skill_level)
-            title, body = parent_dashboard(conn, user, flash="Kid profile created.")
-            return response(start_response, title, body, user)
+            _, create_errors = create_kid_profile(
+                conn,
+                user["id"],
+                form["display_name"],
+                form.get("age_band", "Ages 8-10"),
+                start_skill_level,
+            )
+            if not create_errors:
+                return redirect(start_response, f"/parent?flash={quote_plus('Kid profile created.')}")
+            errors.extend(create_errors)
         title, body = parent_dashboard(conn, user, errors=errors)
         return response(start_response, title, body, user, status="400 Bad Request")
 
@@ -1138,13 +1147,8 @@ def app(environ: dict, start_response: Callable):
                 except ValueError:
                     continue
             ok, note = assign_courses_to_kid(conn, user["id"], kid_id, material_ids)
-            title, body = parent_dashboard(
-                conn,
-                user,
-                flash=note if ok else "",
-                errors=None if ok else [note],
-            )
-            return response(start_response, title, body, user, status="200 OK" if ok else "400 Bad Request")
+            param = "flash" if ok else "error"
+            return redirect(start_response, f"/parent?{param}={quote_plus(note)}")
 
     if request.path.startswith("/kid/"):
         parent = require_user(conn, request, "parent")

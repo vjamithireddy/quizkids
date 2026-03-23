@@ -98,7 +98,10 @@ class QuizKidProductionSetupTests(unittest.TestCase):
         services.UPLOAD_DIR = Path(self.tempdir.name)
         admin_user, _ = create_initial_admin(self.conn, "owner@example.com", "supersecure1", "Owner")
         parent_user, _ = register_parent_account(self.conn, "parent@example.com", "parentpass1", "Parent One")
-        create_kid_profile(self.conn, parent_user["id"], "Maya", "Ages 8-10", 2)
+        self.parent_user_id = parent_user["id"]
+        kid_id, errors = create_kid_profile(self.conn, parent_user["id"], "Maya", "Ages 8-10", 2)
+        self.assertIsNotNone(kid_id)
+        self.assertEqual(errors, [])
         self.admin_id = admin_user["id"]
         self.kid_id = self.conn.execute("SELECT id FROM kid_profiles LIMIT 1").fetchone()[0]
 
@@ -118,6 +121,16 @@ class QuizKidProductionSetupTests(unittest.TestCase):
         self.assertEqual(errors, [])
         stored = self.conn.execute("SELECT * FROM users WHERE email = 'parent2@example.com'").fetchone()
         self.assertEqual(stored["role"], "parent")
+
+    def test_duplicate_kid_name_is_rejected_for_same_parent(self) -> None:
+        kid_id, errors = create_kid_profile(self.conn, self.parent_user_id, "Maya", "Ages 8-10", 2)
+        self.assertIsNone(kid_id)
+        self.assertEqual(errors, ["A kid profile with that name already exists."])
+
+    def test_duplicate_kid_name_is_case_insensitive(self) -> None:
+        kid_id, errors = create_kid_profile(self.conn, self.parent_user_id, "  maya  ", "Ages 8-10", 2)
+        self.assertIsNone(kid_id)
+        self.assertEqual(errors, ["A kid profile with that name already exists."])
 
     def test_material_upload_is_persisted_to_disk(self) -> None:
         ok, _ = create_material(

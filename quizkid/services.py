@@ -32,6 +32,10 @@ def normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
+def normalize_display_name(display_name: str) -> str:
+    return " ".join(display_name.strip().split())
+
+
 def has_admin_account(conn: sqlite3.Connection) -> bool:
     return conn.execute("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1").fetchone() is not None
 
@@ -324,17 +328,38 @@ def destroy_session(conn: sqlite3.Connection, session_id: str) -> None:
     conn.commit()
 
 
-def create_kid_profile(conn: sqlite3.Connection, parent_user_id: int, display_name: str, age_band: str, start_skill_level: int) -> int:
+def create_kid_profile(
+    conn: sqlite3.Connection,
+    parent_user_id: int,
+    display_name: str,
+    age_band: str,
+    start_skill_level: int,
+) -> tuple[int | None, list[str]]:
+    normalized_name = normalize_display_name(display_name)
+    if not normalized_name:
+        return None, ["Kid name is required."]
+    existing = conn.execute(
+        """
+        SELECT id
+        FROM kid_profiles
+        WHERE parent_user_id = ?
+          AND lower(display_name) = lower(?)
+        LIMIT 1
+        """,
+        (parent_user_id, normalized_name),
+    ).fetchone()
+    if existing:
+        return None, ["A kid profile with that name already exists."]
     now = utcnow()
     kid_id = conn.execute(
         """
         INSERT INTO kid_profiles (parent_user_id, display_name, age_band, start_skill_level, current_skill_level, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (parent_user_id, display_name.strip(), age_band.strip(), start_skill_level, start_skill_level, now),
+        (parent_user_id, normalized_name, age_band.strip(), start_skill_level, start_skill_level, now),
     ).lastrowid
     conn.commit()
-    return kid_id
+    return kid_id, []
 
 
 def list_parent_kids(conn: sqlite3.Connection, parent_user_id: int) -> list[sqlite3.Row]:
