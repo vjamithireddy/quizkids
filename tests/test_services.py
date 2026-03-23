@@ -16,6 +16,7 @@ from quizkid.services import (
     get_attempt_progress,
     get_kid_assigned_material_ids,
     get_material,
+    get_topic_for_kid,
     has_admin_account,
     list_assignable_courses,
     list_kid_assigned_courses,
@@ -317,6 +318,24 @@ class QuizKidProductionSetupTests(unittest.TestCase):
         assigned = list_kid_assigned_courses(self.conn, self.kid_id)
         self.assertEqual(len(assigned), 1)
         self.assertEqual(assigned[0]["id"], material_id)
+
+    def test_topic_lookup_for_kid_respects_assignments(self) -> None:
+        create_material(
+            self.conn,
+            self.admin_id,
+            "Fractions Intro",
+            "fractions.txt",
+            "text/plain",
+            b"Fractions show equal parts.\nNumerator counts selected parts.\nDenominator counts the whole.\nEquivalent fractions match values.",
+        )
+        topic_id = self.conn.execute("SELECT id FROM topics ORDER BY id DESC LIMIT 1").fetchone()[0]
+        self.assertIsNone(get_topic_for_kid(self.conn, self.kid_id, topic_id))
+        set_topic_review_status(self.conn, topic_id, "approved", self.admin_id)
+        material_id = self.conn.execute("SELECT material_id FROM topics WHERE id = ?", (topic_id,)).fetchone()[0]
+        assign_courses_to_kid(self.conn, self.parent_user_id, self.kid_id, [material_id])
+        allowed = get_topic_for_kid(self.conn, self.kid_id, topic_id)
+        self.assertIsNotNone(allowed)
+        self.assertEqual(allowed["id"], topic_id)
 
 
 if __name__ == "__main__":

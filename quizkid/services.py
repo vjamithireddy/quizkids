@@ -1015,6 +1015,22 @@ def get_topic(conn: sqlite3.Connection, topic_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM topics WHERE id = ?", (topic_id,)).fetchone()
 
 
+def get_topic_for_kid(conn: sqlite3.Connection, kid_profile_id: int, topic_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT topics.*
+        FROM topics
+        JOIN kid_course_assignments
+          ON kid_course_assignments.material_id = topics.material_id
+         AND kid_course_assignments.kid_profile_id = ?
+        WHERE topics.id = ?
+          AND topics.review_status = 'approved'
+        LIMIT 1
+        """,
+        (kid_profile_id, topic_id),
+    ).fetchone()
+
+
 def get_topic_concepts(conn: sqlite3.Connection, topic_id: int) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM concepts WHERE topic_id = ? ORDER BY id", (topic_id,)).fetchall()
 

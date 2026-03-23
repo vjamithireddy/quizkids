@@ -33,6 +33,7 @@ from .services import (
     get_recent_attempts,
     get_session_user,
     get_topic,
+    get_topic_for_kid,
     get_topic_concepts,
     has_admin_account,
     list_material_questions,
@@ -1064,6 +1065,10 @@ def app(environ: dict, start_response: Callable):
         if not admin_ready:
             title, body = landing_view(request, False, errors=["Create the first admin account before parents can sign in."])
             return response(start_response, title, body, status="400 Bad Request")
+        if user and user["role"] == "parent":
+            return redirect(start_response, "/parent")
+        if user and user["role"] == "admin":
+            return redirect(start_response, "/admin")
         title, body = parent_login_view()
         return response(start_response, title, body, user)
 
@@ -1071,6 +1076,10 @@ def app(environ: dict, start_response: Callable):
         if not admin_ready:
             title, body = landing_view(request, False, errors=["Create the first admin account before registering parents."])
             return response(start_response, title, body, status="400 Bad Request")
+        if user and user["role"] == "parent":
+            return redirect(start_response, "/parent")
+        if user and user["role"] == "admin":
+            return redirect(start_response, "/admin")
         title, body = parent_register_view()
         return response(start_response, title, body, user)
 
@@ -1078,6 +1087,10 @@ def app(environ: dict, start_response: Callable):
         if not admin_ready:
             title, body = landing_view(request, False, errors=["Create the first admin account before admins can sign in."])
             return response(start_response, title, body, status="400 Bad Request")
+        if user and user["role"] == "admin":
+            return redirect(start_response, "/admin")
+        if user and user["role"] == "parent":
+            return redirect(start_response, "/parent")
         title, body = admin_login_view()
         return response(start_response, title, body, user)
 
@@ -1373,6 +1386,9 @@ def app(environ: dict, start_response: Callable):
 
         if len(segments) >= 4 and segments[2] == "topic":
             topic_id = int(segments[3])
+            allowed_topic = get_topic_for_kid(conn, kid["id"], topic_id)
+            if not allowed_topic:
+                return redirect(start_response, f"/kid/{kid['id']}")
             if len(segments) == 4 and request.method == "GET":
                 title, body = kid_topic_view(conn, kid, topic_id)
                 return response(start_response, title, body, parent)
