@@ -110,6 +110,7 @@ def seed_demo_data(conn: sqlite3.Connection) -> None:
         """,
         (parent_id, now),
     )
+    kid_id = conn.execute("SELECT id FROM kid_profiles WHERE parent_user_id = ? ORDER BY id DESC LIMIT 1", (parent_id,)).fetchone()[0]
     material_id = conn.execute(
         """
         INSERT INTO course_materials
@@ -272,6 +273,13 @@ def seed_demo_data(conn: sqlite3.Connection) -> None:
             """,
             (*row, now),
         )
+    conn.execute(
+        """
+        INSERT INTO kid_course_assignments (kid_profile_id, material_id, assigned_at)
+        VALUES (?, ?, ?)
+        """,
+        (kid_id, material_id, now),
+    )
     conn.commit()
 
 
@@ -316,16 +324,17 @@ def destroy_session(conn: sqlite3.Connection, session_id: str) -> None:
     conn.commit()
 
 
-def create_kid_profile(conn: sqlite3.Connection, parent_user_id: int, display_name: str, age_band: str, start_skill_level: int) -> None:
+def create_kid_profile(conn: sqlite3.Connection, parent_user_id: int, display_name: str, age_band: str, start_skill_level: int) -> int:
     now = utcnow()
-    conn.execute(
+    kid_id = conn.execute(
         """
         INSERT INTO kid_profiles (parent_user_id, display_name, age_band, start_skill_level, current_skill_level, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
         (parent_user_id, display_name.strip(), age_band.strip(), start_skill_level, start_skill_level, now),
-    )
+    ).lastrowid
     conn.commit()
+    return kid_id
 
 
 def list_parent_kids(conn: sqlite3.Connection, parent_user_id: int) -> list[sqlite3.Row]:
@@ -337,6 +346,75 @@ def list_parent_kids(conn: sqlite3.Connection, parent_user_id: int) -> list[sqli
         """,
         (parent_user_id,),
     ).fetchall()
+
+
+def list_assignable_courses(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT course_materials.*,
+               COUNT(topics.id) AS approved_topic_count
+        FROM course_materials
+        LEFT JOIN topics
+          ON topics.material_id = course_materials.id
+         AND topics.review_status = 'approved'
+        WHERE course_materials.generation_status = 'generated'
+        GROUP BY course_materials.id
+        ORDER BY course_materials.title
+        """
+    ).fetchall()
+
+
+def get_kid_assigned_material_ids(conn: sqlite3.Connection, kid_profile_id: int) -> set[int]:
+    rows = conn.execute(
+        "SELECT material_id FROM kid_course_assignments WHERE kid_profile_id = ?",
+        (kid_profile_id,),
+    ).fetchall()
+    return {row["material_id"] for row in rows}
+
+
+def list_kid_assigned_courses(conn: sqlite3.Connection, kid_profile_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT course_materials.*
+        FROM kid_course_assignments
+        JOIN course_materials ON course_materials.id = kid_course_assignments.material_id
+        WHERE kid_course_assignments.kid_profile_id = ?
+        ORDER BY course_materials.title
+        """,
+        (kid_profile_id,),
+    ).fetchall()
+
+
+def assign_courses_to_kid(conn: sqlite3.Connection, parent_user_id: int, kid_profile_id: int, material_ids: list[int]) -> tuple[bool, str]:
+    kid = get_kid_profile(conn, kid_profile_id, parent_user_id)
+    if not kid:
+        return False, "Kid profile not found."
+
+    valid_material_ids = {
+        row["id"]
+        for row in conn.execute(
+            """
+            SELECT DISTINCT course_materials.id
+            FROM course_materials
+            JOIN topics ON topics.material_id = course_materials.id
+            WHERE course_materials.generation_status = 'generated'
+              AND topics.review_status = 'approved'
+            """
+        ).fetchall()
+    }
+    filtered_ids = [material_id for material_id in material_ids if material_id in valid_material_ids]
+    now = utcnow()
+    conn.execute("DELETE FROM kid_course_assignments WHERE kid_profile_id = ?", (kid_profile_id,))
+    for material_id in filtered_ids:
+        conn.execute(
+            """
+            INSERT INTO kid_course_assignments (kid_profile_id, material_id, assigned_at)
+            VALUES (?, ?, ?)
+            """,
+            (kid_profile_id, material_id, now),
+        )
+    conn.commit()
+    return True, "Courses assigned."
 
 
 def list_materials(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -716,12 +794,15 @@ def list_topics_for_kid(conn: sqlite3.Connection, kid_profile_id: int) -> list[s
                COALESCE(mastery_scores.mastery_percent, 0) AS mastery_percent,
                COALESCE(mastery_scores.attempts_count, 0) AS attempts_count
         FROM topics
+        JOIN kid_course_assignments
+          ON kid_course_assignments.material_id = topics.material_id
+         AND kid_course_assignments.kid_profile_id = ?
         LEFT JOIN mastery_scores
           ON mastery_scores.topic_id = topics.id AND mastery_scores.kid_profile_id = ?
         WHERE topics.review_status = 'approved'
         ORDER BY topics.subject_name, topics.chapter_name, topics.topic_name
         """,
-        (kid_profile_id,),
+        (kid_profile_id, kid_profile_id),
     ).fetchall()
 
 
@@ -957,16 +1038,23 @@ def get_mastery_rows_for_parent(conn: sqlite3.Connection, parent_user_id: int) -
     return conn.execute(
         """
         SELECT kid_profiles.display_name AS kid_name,
+               course_materials.title AS course_title,
                topics.chapter_name,
                topics.topic_name,
                COALESCE(mastery_scores.mastery_percent, 0) AS mastery_percent,
                COALESCE(mastery_scores.attempts_count, 0) AS attempts_count
         FROM kid_profiles
+        JOIN kid_course_assignments
+          ON kid_course_assignments.kid_profile_id = kid_profiles.id
+        JOIN course_materials
+          ON course_materials.id = kid_course_assignments.material_id
         JOIN topics
+          ON topics.material_id = course_materials.id
         LEFT JOIN mastery_scores
           ON mastery_scores.kid_profile_id = kid_profiles.id
          AND mastery_scores.topic_id = topics.id
         WHERE kid_profiles.parent_user_id = ?
+          AND topics.review_status = 'approved'
         ORDER BY kid_profiles.display_name, topics.chapter_name, topics.topic_name
         """,
         (parent_user_id,),

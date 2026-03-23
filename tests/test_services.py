@@ -7,14 +7,18 @@ from unittest.mock import patch
 from quizkid import services
 from quizkid.db import init_db
 from quizkid.services import (
+    assign_courses_to_kid,
     choose_questions_for_attempt,
     create_initial_admin,
     create_kid_profile,
     create_material,
     delete_material,
     get_attempt_progress,
+    get_kid_assigned_material_ids,
     get_material,
     has_admin_account,
+    list_assignable_courses,
+    list_kid_assigned_courses,
     list_topics_for_kid,
     maybe_complete_attempt,
     record_answer,
@@ -204,6 +208,9 @@ class QuizKidProductionSetupTests(unittest.TestCase):
         self.assertFalse(any(row["id"] == topic["id"] for row in topics_before))
         ok, _ = set_topic_review_status(self.conn, topic["id"], "approved", self.admin_id)
         self.assertTrue(ok)
+        parent_user_id = self.conn.execute("SELECT parent_user_id FROM kid_profiles WHERE id = ?", (self.kid_id,)).fetchone()[0]
+        material_id = self.conn.execute("SELECT material_id FROM topics WHERE id = ?", (topic["id"],)).fetchone()[0]
+        assign_courses_to_kid(self.conn, parent_user_id, self.kid_id, [material_id])
         topics_after = list_topics_for_kid(self.conn, self.kid_id)
         self.assertTrue(any(row["id"] == topic["id"] for row in topics_after))
 
@@ -217,6 +224,9 @@ class QuizKidProductionSetupTests(unittest.TestCase):
             b"Triangles have three sides.\nSquares have four equal sides.\nCircles have no corners.\nRectangles have four sides.",
         )
         topic_id = self.conn.execute("SELECT id FROM topics ORDER BY id DESC LIMIT 1").fetchone()[0]
+        material_id = self.conn.execute("SELECT material_id FROM topics WHERE id = ?", (topic_id,)).fetchone()[0]
+        parent_user_id = self.conn.execute("SELECT parent_user_id FROM kid_profiles WHERE id = ?", (self.kid_id,)).fetchone()[0]
+        assign_courses_to_kid(self.conn, parent_user_id, self.kid_id, [material_id])
         attempt_id = start_quiz_attempt(self.conn, self.kid_id, topic_id)
         self.conn.execute("UPDATE topics SET review_status = 'approved' WHERE id = ?", (topic_id,))
         self.conn.execute(
@@ -243,6 +253,27 @@ class QuizKidProductionSetupTests(unittest.TestCase):
         self.assertTrue(ok)
         selected = choose_questions_for_attempt(self.conn, self.kid_id, topic_id, 2)
         self.assertEqual(len(selected), 1)
+
+    def test_list_assignable_and_assigned_courses(self) -> None:
+        create_material(
+            self.conn,
+            self.admin_id,
+            "Fractions Intro",
+            "fractions.txt",
+            "text/plain",
+            b"Fractions show equal parts.\nNumerator counts selected parts.\nDenominator counts the whole.\nEquivalent fractions match values.",
+        )
+        material_id = self.conn.execute("SELECT id FROM course_materials ORDER BY id DESC LIMIT 1").fetchone()[0]
+        topic_id = self.conn.execute("SELECT id FROM topics ORDER BY id DESC LIMIT 1").fetchone()[0]
+        set_topic_review_status(self.conn, topic_id, "approved", self.admin_id)
+        courses = list_assignable_courses(self.conn)
+        self.assertTrue(any(row["id"] == material_id for row in courses))
+        parent_user_id = self.conn.execute("SELECT parent_user_id FROM kid_profiles WHERE id = ?", (self.kid_id,)).fetchone()[0]
+        assign_courses_to_kid(self.conn, parent_user_id, self.kid_id, [material_id])
+        self.assertEqual(get_kid_assigned_material_ids(self.conn, self.kid_id), {material_id})
+        assigned = list_kid_assigned_courses(self.conn, self.kid_id)
+        self.assertEqual(len(assigned), 1)
+        self.assertEqual(assigned[0]["id"], material_id)
 
 
 if __name__ == "__main__":

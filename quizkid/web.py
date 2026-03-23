@@ -13,6 +13,7 @@ from .config import COOKIE_SECURE, SEED_DEMO_DATA
 from .db import get_connection, init_db
 from .security import SESSION_COOKIE, make_session_token, read_session_token
 from .services import (
+    assign_courses_to_kid,
     authenticate_user,
     create_initial_admin,
     create_kid_profile,
@@ -22,7 +23,10 @@ from .services import (
     destroy_session,
     get_attempt,
     get_attempt_progress,
+    get_kid_assigned_material_ids,
     get_kid_profile,
+    list_assignable_courses,
+    list_kid_assigned_courses,
     get_material,
     get_material_topics,
     get_mastery_rows_for_parent,
@@ -677,12 +681,21 @@ def admin_material_review(conn: sqlite3.Connection, user: sqlite3.Row, material_
 
 def parent_dashboard(conn: sqlite3.Connection, user: sqlite3.Row, flash: str = "", errors: list[str] | None = None) -> tuple[str, str]:
     kids = list_parent_kids(conn, user["id"])
+    courses = list_assignable_courses(conn)
     mastery_rows = get_mastery_rows_for_parent(conn, user["id"])
     flash_html = f"<div class='flash'>{html_escape(flash)}</div>" if flash else ""
     error_html = "".join(f"<div class='flash error'>{html_escape(err)}</div>" for err in (errors or []))
     kid_cards = []
     for kid in kids:
         attempts = get_recent_attempts(conn, kid["id"])
+        assigned_courses = list_kid_assigned_courses(conn, kid["id"])
+        assigned_ids = get_kid_assigned_material_ids(conn, kid["id"])
+        assigned_list = "".join(f"<li>{html_escape(course['title'])}</li>" for course in assigned_courses) or "<li>No courses assigned yet.</li>"
+        course_checks = "".join(
+            f"<label><input type='checkbox' name='material_ids' value='{course['id']}' {'checked' if course['id'] in assigned_ids else ''}> "
+            f"{html_escape(course['title'])} ({course['approved_topic_count']} approved topics)</label>"
+            for course in courses
+        ) or "<p class='muted'>No approved courses are available yet.</p>"
         attempt_list = "".join(
             f"<li>{html_escape(row['topic_name'])}: {row['score']:.0f}% on {html_escape(row['started_at'][:10])}</li>"
             for row in attempts[:3]
@@ -691,13 +704,20 @@ def parent_dashboard(conn: sqlite3.Connection, user: sqlite3.Row, flash: str = "
             "<div class='panel'>"
             f"<h2>{html_escape(kid['display_name'])}</h2>"
             f"<p>Age band: {html_escape(kid['age_band'])}<br>Current skill level: {kid['current_skill_level']}</p>"
-            f"<div class='row'><a class='button secondary' href='/kid/{kid['id']}'>Launch Kid Mode</a></div>"
+            f"<div class='row'><a class='button secondary' href='/kid/{kid['id']}'>Open Kid Learning Path</a></div>"
+            "<h3>Assigned Courses</h3>"
+            f"<ul>{assigned_list}</ul>"
+            f"<form method='post' action='/parent/kids/{kid['id']}/assign-courses'>"
+            f"{course_checks}"
+            "<button type='submit'>Save Course Assignment</button>"
+            "</form>"
             f"<h3>Recent Attempts</h3><ul>{attempt_list}</ul>"
             "</div>"
         )
     mastery_html = "".join(
         "<tr>"
         f"<td>{html_escape(row['kid_name'])}</td>"
+        f"<td>{html_escape(row['course_title'])}</td>"
         f"<td>{html_escape(row['chapter_name'])}</td>"
         f"<td>{html_escape(row['topic_name'])}</td>"
         f"<td>{row['mastery_percent']:.1f}%</td>"
@@ -737,12 +757,13 @@ def parent_dashboard(conn: sqlite3.Connection, user: sqlite3.Row, flash: str = "
           </label>
           <button type="submit">Create Profile</button>
         </form>
+        <p class="muted">After creation, assign a course below so the kid sees the correct learning path.</p>
       </section>
       <section class="panel">
         <h2>Topic Mastery</h2>
         <table>
-          <thead><tr><th>Kid</th><th>Chapter</th><th>Topic</th><th>Mastery</th><th>Attempts</th></tr></thead>
-          <tbody>{mastery_html or '<tr><td colspan=\"5\">Mastery data will appear after the first quiz attempt.</td></tr>'}</tbody>
+          <thead><tr><th>Kid</th><th>Course</th><th>Chapter</th><th>Topic</th><th>Mastery</th><th>Attempts</th></tr></thead>
+          <tbody>{mastery_html or '<tr><td colspan=\"6\">Mastery data will appear after the first quiz attempt.</td></tr>'}</tbody>
         </table>
       </section>
     </div>
@@ -769,10 +790,10 @@ def kid_dashboard(conn: sqlite3.Connection, kid: sqlite3.Row, flash: str = "") -
     <section class="hero">
       <span class="tag">Kid Mode</span>
       <h1>{html_escape(kid['display_name'])}'s learning paths</h1>
-      <p>Pick a topic, use hints when needed, and build mastery by working through short puzzle runs.</p>
+      <p>Pick a topic from assigned courses, use hints when needed, and build mastery by working through short puzzle runs.</p>
       {flash_html}
     </section>
-    <div class="grid">{''.join(topic_cards)}</div>
+    <div class="grid">{''.join(topic_cards) or "<section class='panel'><h2>No assigned courses yet</h2><p>Your parent needs to assign an approved course before topics appear here.</p></section>"}</div>
     """
     return f"{kid['display_name']} Topics", body
 
@@ -1097,6 +1118,33 @@ def app(environ: dict, start_response: Callable):
             return response(start_response, title, body, user)
         title, body = parent_dashboard(conn, user, errors=errors)
         return response(start_response, title, body, user, status="400 Bad Request")
+
+    if request.path.startswith("/parent/kids/") and request.method == "POST":
+        user = require_user(conn, request, "parent")
+        if not user:
+            return redirect(start_response, "/")
+        segments = [segment for segment in request.path.split("/") if segment]
+        try:
+            kid_id = int(segments[2])
+        except (ValueError, IndexError):
+            return response(start_response, "Not Found", "<section class='panel'><p>Kid profile not found.</p></section>", user, status="404 Not Found")
+        if len(segments) == 4 and segments[3] == "assign-courses":
+            raw_body = request.body_bytes().decode("utf-8", errors="ignore")
+            values = [value for value in raw_body.split("&") if value.startswith("material_ids=")]
+            material_ids = []
+            for value in values:
+                try:
+                    material_ids.append(int(value.split("=", 1)[1]))
+                except ValueError:
+                    continue
+            ok, note = assign_courses_to_kid(conn, user["id"], kid_id, material_ids)
+            title, body = parent_dashboard(
+                conn,
+                user,
+                flash=note if ok else "",
+                errors=None if ok else [note],
+            )
+            return response(start_response, title, body, user, status="200 OK" if ok else "400 Bad Request")
 
     if request.path.startswith("/kid/"):
         parent = require_user(conn, request, "parent")

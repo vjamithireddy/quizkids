@@ -137,6 +137,13 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     details TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS kid_course_assignments (
+    kid_profile_id INTEGER NOT NULL REFERENCES kid_profiles(id) ON DELETE CASCADE,
+    material_id INTEGER NOT NULL REFERENCES course_materials(id) ON DELETE CASCADE,
+    assigned_at TEXT NOT NULL,
+    PRIMARY KEY (kid_profile_id, material_id)
+);
 """
 
 
