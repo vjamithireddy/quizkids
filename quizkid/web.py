@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import html
-import io
+import os
 import sqlite3
 from http import cookies
 from pathlib import Path
@@ -581,6 +581,10 @@ def app(environ: dict, start_response: Callable):
     request = Request(environ)
     user = current_user(conn, request)
 
+    if request.path == "/health" and request.method == "GET":
+        start_response("200 OK", [("Content-Type", "text/plain; charset=utf-8")])
+        return [b"ok"]
+
     if request.path == "/" and request.method == "GET":
         title, body = landing_view(request)
         return response(start_response, title, body, user)
@@ -716,3 +720,9 @@ def run_dev_server(host: str = "127.0.0.1", port: int = 8000) -> None:
     with make_server(host, port, app) as server:
         print(f"QuizKid running at http://{host}:{port}")
         server.serve_forever()
+
+
+def run_from_env() -> None:
+    host = os.environ.get("APP_HOST", "127.0.0.1")
+    port = int(os.environ.get("APP_PORT", "8000"))
+    run_dev_server(host=host, port=port)

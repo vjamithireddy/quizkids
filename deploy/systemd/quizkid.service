@@ -1,0 +1,16 @@
+[Unit]
+Description=QuizKid web service
+After=network.target
+
+[Service]
+Type=simple
+User=svc_quizkid
+Group=svc_quizkid
+WorkingDirectory=/opt/quizkid/app
+EnvironmentFile=/opt/quizkid/app/.env
+ExecStart=/opt/quizkid/app/.venv/bin/python /opt/quizkid/app/run.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
