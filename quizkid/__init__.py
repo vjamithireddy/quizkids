@@ -1,0 +1,1 @@
+"""QuizKid application package."""
