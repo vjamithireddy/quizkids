@@ -496,6 +496,178 @@ def normalize_extracted_text(text: str) -> str:
     return "\n".join(lines)
 
 
+def _is_likely_noise_line(line: str) -> bool:
+    lowered = line.lower()
+    if re.fullmatch(r"\d+", line):
+        return True
+    if any(token in lowered for token in {"ncert", "www.", "http://", "https://", "isbn"}):
+        return True
+    if len(line) <= 2:
+        return True
+    return False
+
+
+def _clean_source_lines(source_text: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in normalize_extracted_text(source_text).split("\n"):
+        line = raw_line.strip(" -\t")
+        if not line or _is_likely_noise_line(line):
+            continue
+        lines.append(line)
+    return lines
+
+
+def _looks_like_title(line: str) -> bool:
+    if len(line) > 80:
+        return False
+    words = re.findall(r"[A-Za-z][A-Za-z'-]*", line)
+    if not 2 <= len(words) <= 8:
+        return False
+    alpha_ratio = sum(ch.isalpha() or ch.isspace() for ch in line) / max(len(line), 1)
+    if alpha_ratio < 0.8:
+        return False
+    title_case_words = sum(1 for word in words if word[:1].isupper())
+    return title_case_words >= max(2, len(words) - 1)
+
+
+def _heading_label(line: str) -> str | None:
+    cleaned = re.sub(r"\s+", " ", line).strip(" :.-")
+    chapter_match = re.match(r"(?i)^chapter\s+(\d+)(?:\s*[:-]\s*(.+))?$", cleaned)
+    if chapter_match:
+        chapter_num = chapter_match.group(1)
+        trailing = (chapter_match.group(2) or "").strip()
+        if trailing:
+            return f"Chapter {chapter_num}: {trailing}"
+        return f"Chapter {chapter_num}"
+    numbered_title = re.match(r"^(\d+)\s+([A-Z][A-Za-z0-9,()'&/-]*(?:\s+[A-Z][A-Za-z0-9,()'&/-]*){1,7})$", cleaned)
+    if numbered_title:
+        return f"Chapter {numbered_title.group(1)}: {numbered_title.group(2).strip()}"
+    if _looks_like_title(cleaned):
+        return cleaned
+    return None
+
+
+def _topic_name_from_heading(heading: str, body_lines: list[str]) -> str:
+    if ":" in heading:
+        after_colon = heading.split(":", 1)[1].strip()
+        if after_colon:
+            return after_colon
+    if re.match(r"(?i)^chapter\s+\d+$", heading) and body_lines:
+        maybe_title = body_lines[0].strip()
+        if _looks_like_title(maybe_title):
+            return maybe_title
+    return heading
+
+
+def _split_topic_blocks(title: str, source_text: str) -> list[dict[str, str]]:
+    lines = _clean_source_lines(source_text)
+    if not lines:
+        return []
+
+    blocks: list[dict[str, str]] = []
+    current_heading = title.strip() or "Uploaded Chapter"
+    current_body: list[str] = []
+
+    def flush_block() -> None:
+        nonlocal current_heading, current_body
+        body = [line for line in current_body if line.strip()]
+        if not body:
+            return
+        topic_name = _topic_name_from_heading(current_heading, body)
+        summary = body[0][:220]
+        body_text = "\n".join(body)
+        blocks.append(
+            {
+                "chapter_name": current_heading,
+                "topic_name": topic_name,
+                "summary": summary,
+                "body_text": body_text,
+            }
+        )
+
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        heading = _heading_label(line)
+        if heading:
+            next_line = lines[index + 1] if index + 1 < len(lines) else ""
+            if re.match(r"(?i)^chapter\s+\d+$", heading) and _looks_like_title(next_line):
+                heading = f"{heading}: {next_line}"
+                index += 1
+            if current_body:
+                flush_block()
+                current_body = []
+            current_heading = heading
+        else:
+            current_body.append(line)
+        index += 1
+
+    if current_body:
+        flush_block()
+
+    if blocks:
+        return blocks[:12]
+
+    fallback_body = lines[:24]
+    if not fallback_body:
+        return []
+    return [
+        {
+            "chapter_name": title.strip() or "Uploaded Chapter",
+            "topic_name": title.strip() or "New Topic",
+            "summary": fallback_body[0][:220],
+            "body_text": "\n".join(fallback_body),
+        }
+    ]
+
+
+def _sentence_candidates(text: str) -> list[str]:
+    normalized = normalize_extracted_text(text)
+    pieces = re.split(r"(?<=[.!?])\s+|\n+", normalized)
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for piece in pieces:
+        sentence = re.sub(r"\s+", " ", piece).strip(" -")
+        if len(sentence) < 20 or len(sentence) > 240:
+            continue
+        lowered = sentence.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        candidates.append(sentence)
+    return candidates
+
+
+def _concept_title_from_sentence(sentence: str) -> str:
+    trimmed = sentence.rstrip(".!?")
+    if ":" in trimmed and len(trimmed.split(":", 1)[0].split()) <= 6:
+        trimmed = trimmed.split(":", 1)[0]
+    words = trimmed.split()
+    return " ".join(words[:6]) if words else "Concept"
+
+
+def _build_question_prompt(topic_name: str, concept_title: str, explanation: str) -> str:
+    subject = concept_title.strip() or topic_name.strip() or "this concept"
+    lowered = explanation.lower()
+    if " is " in lowered or " are " in lowered:
+        return f"Which statement is correct about {subject}?"
+    return f"Which idea best matches {subject} in {topic_name}?"
+
+
+def _pick_distractors(explanations: list[str], current_index: int) -> list[str]:
+    distractors = [text for idx, text in enumerate(explanations) if idx != current_index]
+    filler = [
+        "It is mainly about a different topic from the lesson.",
+        "It focuses on something unrelated to this chapter.",
+        "It does not match the explained concept.",
+    ]
+    for item in filler:
+        if len(distractors) >= 3:
+            break
+        distractors.append(item)
+    return distractors[:3]
+
+
 def extract_pdf_text(payload: bytes) -> tuple[str, str]:
     try:
         reader_class = load_pdf_reader_class()
@@ -544,93 +716,92 @@ def store_material_upload(filename: str, payload: bytes) -> tuple[str, str, int]
     return stored_filename, str(stored_path), len(payload)
 
 
-def _normalize_chunks(source_text: str) -> list[str]:
-    chunks = [chunk.strip() for chunk in normalize_extracted_text(source_text).split("\n") if chunk.strip()]
-    unique: list[str] = []
-    seen: set[str] = set()
-    for chunk in chunks:
-        key = chunk.lower()
-        if key not in seen:
-            seen.add(key)
-            unique.append(chunk)
-    return unique[:8]
-
-
-def _title_from_chunk(chunk: str) -> str:
-    words = chunk.replace(".", "").split()
-    return " ".join(words[:4]) if words else "Concept"
-
-
 def generate_content_from_material(conn: sqlite3.Connection, material_id: int, title: str, source_text: str) -> tuple[str, float]:
     now = utcnow()
-    chunks = _normalize_chunks(source_text)
-    if not chunks:
+    topic_blocks = _split_topic_blocks(title, source_text)
+    if not topic_blocks:
         return "quarantined", 0.1
 
-    subject_name = "General Studies"
-    chapter_name = title.strip() or "Uploaded Chapter"
-    topic_name = title.strip() or "New Topic"
-    summary = chunks[0][:220]
-    topic_id = conn.execute(
-        """
-        INSERT INTO topics (material_id, subject_name, chapter_name, topic_name, summary, review_status, created_at)
-        VALUES (?, ?, ?, ?, ?, 'pending', ?)
-        """,
-        (material_id, subject_name, chapter_name, topic_name, summary, now),
-    ).lastrowid
+    generated_topics = 0
+    generated_questions = 0
+    subject_name = "Mathematics" if "math" in title.lower() else "General Studies"
 
-    concept_ids: list[int] = []
-    explanations: list[str] = []
-    for idx, chunk in enumerate(chunks[:4], start=1):
-        concept_id = conn.execute(
+    for block in topic_blocks:
+        sentences = _sentence_candidates(block["body_text"])
+        if len(sentences) < 2:
+            continue
+        topic_id = conn.execute(
             """
-            INSERT INTO concepts (topic_id, concept_title, explanation, example_text, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO topics (material_id, subject_name, chapter_name, topic_name, summary, review_status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'pending', ?)
             """,
             (
-                topic_id,
-                _title_from_chunk(chunk),
-                chunk,
-                f"Example {idx}: {chunk}",
+                material_id,
+                subject_name,
+                block["chapter_name"],
+                block["topic_name"],
+                block["summary"],
                 now,
             ),
         ).lastrowid
-        concept_ids.append(concept_id)
-        explanations.append(chunk)
 
-    if len(concept_ids) < 2:
+        concept_ids: list[int] = []
+        explanations: list[str] = []
+        for idx, sentence in enumerate(sentences[:4], start=1):
+            concept_title = _concept_title_from_sentence(sentence)
+            concept_id = conn.execute(
+                """
+                INSERT INTO concepts (topic_id, concept_title, explanation, example_text, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    topic_id,
+                    concept_title,
+                    sentence,
+                    f"From {block['topic_name']}: {sentence}",
+                    now,
+                ),
+            ).lastrowid
+            concept_ids.append(concept_id)
+            explanations.append(sentence)
+
+        if len(concept_ids) < 2:
+            continue
+
+        generated_topics += 1
+        for idx, concept_id in enumerate(concept_ids):
+            explanation = explanations[idx]
+            distractors = _pick_distractors(explanations, idx)
+            choices = [explanation, *distractors]
+            prompt = _build_question_prompt(block["topic_name"], _concept_title_from_sentence(explanation), explanation)
+            difficulty = min(5, 1 + idx)
+            conn.execute(
+                """
+                INSERT INTO questions
+                    (concept_id, prompt, choice_a, choice_b, choice_c, choice_d, correct_choice, explanation, hint_text, difficulty_level, question_variant_group, review_status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (
+                    concept_id,
+                    prompt,
+                    choices[0],
+                    choices[1],
+                    choices[2],
+                    choices[3],
+                    "A",
+                    f"That answer is correct because it comes directly from the lesson text for {block['topic_name']}.",
+                    f"Review the concept card for {_concept_title_from_sentence(explanation)} before answering.",
+                    difficulty,
+                    f"material-{material_id}-concept-{concept_id}",
+                    now,
+                ),
+            )
+            generated_questions += 1
+
+    if generated_topics == 0 or generated_questions < 2:
         return "quarantined", 0.25
-
-    for idx, concept_id in enumerate(concept_ids):
-        concept = explanations[idx]
-        distractors = [text for pos, text in enumerate(explanations) if pos != idx] or [concept]
-        choices = [concept, *distractors[:3]]
-        while len(choices) < 4:
-            choices.append("This does not match the concept.")
-        prompt = f"Which explanation best matches the concept '{_title_from_chunk(concept)}'?"
-        difficulty = min(3, 1 + idx)
-        conn.execute(
-            """
-            INSERT INTO questions
-                (concept_id, prompt, choice_a, choice_b, choice_c, choice_d, correct_choice, explanation, hint_text, difficulty_level, question_variant_group, review_status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-            """,
-            (
-                concept_id,
-                prompt,
-                choices[0],
-                choices[1],
-                choices[2],
-                choices[3],
-                "A",
-                f"The concept '{_title_from_chunk(concept)}' matches the first description because it comes from the source material for this concept.",
-                f"Review the concept card for '{_title_from_chunk(concept)}' before answering.",
-                difficulty,
-                f"material-{material_id}-concept-{concept_id}",
-                now,
-            ),
-        )
-    return "generated", min(0.95, 0.55 + len(concept_ids) * 0.1)
+    quality_score = min(0.98, 0.52 + generated_topics * 0.08 + min(generated_questions, 16) * 0.015)
+    return "generated", quality_score
 
 
 def create_material(conn: sqlite3.Connection, user_id: int, title: str, filename: str, mime_type: str, payload: bytes) -> tuple[bool, list[str]]:

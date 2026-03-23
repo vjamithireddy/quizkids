@@ -87,6 +87,36 @@ class QuizKidServiceTests(unittest.TestCase):
         self.assertTrue(notes)
         self.assertGreaterEqual(topic_count, 2)
 
+    def test_textbook_style_content_generates_multiple_topics(self) -> None:
+        ok, _ = create_material(
+            self.conn,
+            1,
+            "NCERT Maths Grade 6",
+            "ncert-maths.txt",
+            "text/plain",
+            (
+                b"Chapter 1\nKnowing Our Numbers\n"
+                b"We use large numbers in daily life to count people, money, and distance.\n"
+                b"Digits placed in different positions have different values in the place value system.\n"
+                b"Commas help us read large numbers in an easy way.\n"
+                b"Estimation helps us make quick and reasonable guesses about quantities.\n"
+                b"Chapter 2\nWhole Numbers\n"
+                b"Whole numbers start from zero and continue without end.\n"
+                b"The successor of a number is one more than the number.\n"
+                b"The predecessor of a number is one less than the number.\n"
+                b"Whole numbers can be shown on a number line to compare and order them.\n"
+            ),
+        )
+        self.assertTrue(ok)
+        topics = self.conn.execute(
+            "SELECT chapter_name, topic_name FROM topics ORDER BY id"
+        ).fetchall()
+        topic_names = {row["topic_name"] for row in topics}
+        self.assertIn("Knowing Our Numbers", topic_names)
+        self.assertIn("Whole Numbers", topic_names)
+        question_count = self.conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
+        self.assertGreaterEqual(question_count, 4)
+
 
 class QuizKidProductionSetupTests(unittest.TestCase):
     def setUp(self) -> None:
