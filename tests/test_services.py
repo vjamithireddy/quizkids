@@ -9,6 +9,7 @@ from quizkid.db import init_db
 from quizkid.services import (
     choose_questions_for_attempt,
     create_initial_admin,
+    create_kid_profile,
     create_material,
     delete_material,
     get_attempt_progress,
@@ -20,6 +21,8 @@ from quizkid.services import (
     register_parent_account,
     regenerate_material,
     recommend_next_skill,
+    set_question_review_status,
+    set_topic_review_status,
     seed_demo_data,
     start_quiz_attempt,
 )
@@ -75,10 +78,10 @@ class QuizKidServiceTests(unittest.TestCase):
             "text/plain",
             b"Plants need sunlight.\nRoots help absorb water.\nLeaves make food.\nStems support the plant.",
         )
-        topics = list_topics_for_kid(self.conn, self.kid_id)
+        topic_count = self.conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
         self.assertTrue(ok)
         self.assertTrue(notes)
-        self.assertGreaterEqual(len(topics), 2)
+        self.assertGreaterEqual(topic_count, 2)
 
 
 class QuizKidProductionSetupTests(unittest.TestCase):
@@ -89,6 +92,11 @@ class QuizKidProductionSetupTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.original_upload_dir = services.UPLOAD_DIR
         services.UPLOAD_DIR = Path(self.tempdir.name)
+        admin_user, _ = create_initial_admin(self.conn, "owner@example.com", "supersecure1", "Owner")
+        parent_user, _ = register_parent_account(self.conn, "parent@example.com", "parentpass1", "Parent One")
+        create_kid_profile(self.conn, parent_user["id"], "Maya", "Ages 8-10", 2)
+        self.admin_id = admin_user["id"]
+        self.kid_id = self.conn.execute("SELECT id FROM kid_profiles LIMIT 1").fetchone()[0]
 
     def tearDown(self) -> None:
         services.UPLOAD_DIR = self.original_upload_dir
@@ -96,26 +104,21 @@ class QuizKidProductionSetupTests(unittest.TestCase):
         self.conn.close()
 
     def test_initial_admin_can_only_be_created_once(self) -> None:
-        self.assertFalse(has_admin_account(self.conn))
-        admin_user, errors = create_initial_admin(self.conn, "owner@example.com", "supersecure1", "Owner")
-        self.assertIsNotNone(admin_user)
-        self.assertEqual(errors, [])
         second_admin, second_errors = create_initial_admin(self.conn, "again@example.com", "supersecure1", "Again")
         self.assertIsNone(second_admin)
         self.assertIn("already complete", second_errors[0])
 
     def test_parent_registration_creates_real_account(self) -> None:
-        parent_user, errors = register_parent_account(self.conn, "parent@example.com", "parentpass1", "Parent One")
+        parent_user, errors = register_parent_account(self.conn, "parent2@example.com", "parentpass1", "Parent Two")
         self.assertIsNotNone(parent_user)
         self.assertEqual(errors, [])
-        stored = self.conn.execute("SELECT * FROM users WHERE email = 'parent@example.com'").fetchone()
+        stored = self.conn.execute("SELECT * FROM users WHERE email = 'parent2@example.com'").fetchone()
         self.assertEqual(stored["role"], "parent")
 
     def test_material_upload_is_persisted_to_disk(self) -> None:
-        admin_user, _ = create_initial_admin(self.conn, "owner@example.com", "supersecure1", "Owner")
         ok, _ = create_material(
             self.conn,
-            admin_user["id"],
+            self.admin_id,
             "Animals Intro",
             "animals.txt",
             "text/plain",
@@ -153,10 +156,9 @@ class QuizKidProductionSetupTests(unittest.TestCase):
         self.assertIn("dependency is not installed", extracted)
 
     def test_delete_material_removes_file_and_row(self) -> None:
-        admin_user, _ = create_initial_admin(self.conn, "owner@example.com", "supersecure1", "Owner")
         create_material(
             self.conn,
-            admin_user["id"],
+            self.admin_id,
             "Animals Intro",
             "animals.txt",
             "text/plain",
@@ -165,16 +167,15 @@ class QuizKidProductionSetupTests(unittest.TestCase):
         material = self.conn.execute("SELECT * FROM course_materials ORDER BY id DESC LIMIT 1").fetchone()
         stored_path = Path(material["stored_file_path"])
         self.assertTrue(stored_path.exists())
-        ok, _ = delete_material(self.conn, material["id"], admin_user["id"])
+        ok, _ = delete_material(self.conn, material["id"], self.admin_id)
         self.assertTrue(ok)
         self.assertFalse(stored_path.exists())
         self.assertIsNone(get_material(self.conn, material["id"]))
 
     def test_regenerate_material_rebuilds_topics(self) -> None:
-        admin_user, _ = create_initial_admin(self.conn, "owner@example.com", "supersecure1", "Owner")
         create_material(
             self.conn,
-            admin_user["id"],
+            self.admin_id,
             "Plants Intro",
             "plants.txt",
             "text/plain",
@@ -183,11 +184,65 @@ class QuizKidProductionSetupTests(unittest.TestCase):
         material = self.conn.execute("SELECT * FROM course_materials ORDER BY id DESC LIMIT 1").fetchone()
         self.conn.execute("DELETE FROM topics WHERE material_id = ?", (material["id"],))
         self.conn.commit()
-        ok, note = regenerate_material(self.conn, material["id"], admin_user["id"])
+        ok, note = regenerate_material(self.conn, material["id"], self.admin_id)
         topic_count = self.conn.execute("SELECT COUNT(*) FROM topics WHERE material_id = ?", (material["id"],)).fetchone()[0]
         self.assertTrue(ok)
         self.assertIn("Generated automatically", note)
         self.assertGreater(topic_count, 0)
+
+    def test_approved_topics_are_only_ones_shown_to_kids(self) -> None:
+        create_material(
+            self.conn,
+            self.admin_id,
+            "Plants Intro",
+            "plants.txt",
+            "text/plain",
+            b"Plants need sunlight.\nRoots absorb water.\nLeaves make food.\nStems support the plant.",
+        )
+        topic = self.conn.execute("SELECT * FROM topics ORDER BY id DESC LIMIT 1").fetchone()
+        topics_before = list_topics_for_kid(self.conn, self.kid_id)
+        self.assertFalse(any(row["id"] == topic["id"] for row in topics_before))
+        ok, _ = set_topic_review_status(self.conn, topic["id"], "approved", self.admin_id)
+        self.assertTrue(ok)
+        topics_after = list_topics_for_kid(self.conn, self.kid_id)
+        self.assertTrue(any(row["id"] == topic["id"] for row in topics_after))
+
+    def test_question_must_be_approved_for_quiz_selection(self) -> None:
+        create_material(
+            self.conn,
+            self.admin_id,
+            "Shapes Intro",
+            "shapes.txt",
+            "text/plain",
+            b"Triangles have three sides.\nSquares have four equal sides.\nCircles have no corners.\nRectangles have four sides.",
+        )
+        topic_id = self.conn.execute("SELECT id FROM topics ORDER BY id DESC LIMIT 1").fetchone()[0]
+        attempt_id = start_quiz_attempt(self.conn, self.kid_id, topic_id)
+        self.conn.execute("UPDATE topics SET review_status = 'approved' WHERE id = ?", (topic_id,))
+        self.conn.execute(
+            """
+            UPDATE questions
+            SET review_status = 'rejected', active = 0
+            WHERE concept_id IN (SELECT id FROM concepts WHERE topic_id = ?)
+            """,
+            (topic_id,),
+        )
+        self.conn.commit()
+        self.assertEqual(choose_questions_for_attempt(self.conn, self.kid_id, topic_id, 2), [])
+        question_id = self.conn.execute(
+            """
+            SELECT questions.id
+            FROM questions
+            JOIN concepts ON concepts.id = questions.concept_id
+            WHERE concepts.topic_id = ?
+            LIMIT 1
+            """,
+            (topic_id,),
+        ).fetchone()[0]
+        ok, _ = set_question_review_status(self.conn, question_id, "approved", self.admin_id)
+        self.assertTrue(ok)
+        selected = choose_questions_for_attempt(self.conn, self.kid_id, topic_id, 2)
+        self.assertEqual(len(selected), 1)
 
 
 if __name__ == "__main__":

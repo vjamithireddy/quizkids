@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS topics (
     chapter_name TEXT NOT NULL,
     topic_name TEXT NOT NULL,
     summary TEXT NOT NULL,
+    review_status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL
 );
 
@@ -90,6 +91,7 @@ CREATE TABLE IF NOT EXISTS questions (
     hint_text TEXT NOT NULL,
     difficulty_level INTEGER NOT NULL,
     question_variant_group TEXT NOT NULL,
+    review_status TEXT NOT NULL DEFAULT 'pending',
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
 );
@@ -143,6 +145,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "course_materials", "stored_filename", "TEXT")
     ensure_column(conn, "course_materials", "stored_file_path", "TEXT")
     ensure_column(conn, "course_materials", "stored_file_size", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(conn, "topics", "review_status", "TEXT NOT NULL DEFAULT 'pending'")
+    ensure_column(conn, "questions", "review_status", "TEXT NOT NULL DEFAULT 'pending'")
     conn.commit()
 
 

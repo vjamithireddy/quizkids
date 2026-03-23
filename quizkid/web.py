@@ -39,6 +39,8 @@ from .services import (
     record_answer,
     regenerate_material,
     register_parent_account,
+    set_question_review_status,
+    set_topic_review_status,
     seed_demo_data,
     start_quiz_attempt,
     summarize_generation_risk,
@@ -604,7 +606,12 @@ def admin_material_review(conn: sqlite3.Connection, user: sqlite3.Row, material_
             "<section class='panel'>"
             f"<span class='tag'>{html_escape(topic['chapter_name'])}</span>"
             f"<h2>{html_escape(topic['topic_name'])}</h2>"
+            f"<p><strong>Review:</strong> {html_escape(topic['review_status'])}</p>"
             f"<p>{html_escape(topic['summary'])}</p>"
+            "<div class='material-actions'>"
+            f"<form method='post' action='/admin/topics/{topic['id']}/approve'><button class='secondary' type='submit'>Approve Topic</button></form>"
+            f"<form method='post' action='/admin/topics/{topic['id']}/reject'><button class='danger' type='submit'>Reject Topic</button></form>"
+            "</div>"
             f"{concept_html}"
             "</section>"
         )
@@ -614,6 +621,13 @@ def admin_material_review(conn: sqlite3.Connection, user: sqlite3.Row, material_
         f"<td>{html_escape(row['concept_title'])}</td>"
         f"<td>{html_escape(row['prompt'])}</td>"
         f"<td>{row['difficulty_level']}</td>"
+        f"<td>{html_escape(row['review_status'])}</td>"
+        "<td>"
+        "<div class='material-actions'>"
+        f"<form method='post' action='/admin/questions/{row['id']}/approve'><button class='secondary' type='submit'>Approve</button></form>"
+        f"<form method='post' action='/admin/questions/{row['id']}/reject'><button class='danger' type='submit'>Reject</button></form>"
+        "</div>"
+        "</td>"
         "</tr>"
         for row in questions[:20]
     )
@@ -653,8 +667,8 @@ def admin_material_review(conn: sqlite3.Connection, user: sqlite3.Row, material_
     <section class="panel">
       <h2>Generated Questions</h2>
       <table>
-        <thead><tr><th>Topic</th><th>Concept</th><th>Prompt</th><th>Difficulty</th></tr></thead>
-        <tbody>{question_rows or '<tr><td colspan=\"4\">No generated questions yet.</td></tr>'}</tbody>
+        <thead><tr><th>Topic</th><th>Concept</th><th>Prompt</th><th>Difficulty</th><th>Review</th><th>Actions</th></tr></thead>
+        <tbody>{question_rows or '<tr><td colspan=\"6\">No generated questions yet.</td></tr>'}</tbody>
       </table>
     </section>
     """
@@ -1010,6 +1024,53 @@ def app(environ: dict, start_response: Callable):
                 return response(start_response, title, body, user)
             title, body = admin_dashboard(conn, user, errors=[note])
             return response(start_response, title, body, user, status="400 Bad Request")
+
+    if request.path.startswith("/admin/topics/") and request.method == "POST":
+        user = require_user(conn, request, "admin")
+        if not user:
+            return redirect(start_response, "/")
+        segments = [segment for segment in request.path.split("/") if segment]
+        try:
+            topic_id = int(segments[2])
+        except (ValueError, IndexError):
+            return response(start_response, "Not Found", "<section class='panel'><p>Topic not found.</p></section>", user, status="404 Not Found")
+        action = segments[3] if len(segments) > 3 else ""
+        status = "approved" if action == "approve" else "rejected" if action == "reject" else ""
+        ok, note = set_topic_review_status(conn, topic_id, status, user["id"])
+        material_row = conn.execute("SELECT material_id FROM topics WHERE id = ?", (topic_id,)).fetchone()
+        if material_row:
+            title, body = admin_material_review(conn, user, material_row["material_id"], flash=note if ok else "", errors=None if ok else [note])
+            return response(start_response, title, body, user, status="200 OK" if ok else "400 Bad Request")
+        title, body = admin_dashboard(conn, user, flash=note if ok else "", errors=None if ok else [note])
+        return response(start_response, title, body, user, status="200 OK" if ok else "400 Bad Request")
+
+    if request.path.startswith("/admin/questions/") and request.method == "POST":
+        user = require_user(conn, request, "admin")
+        if not user:
+            return redirect(start_response, "/")
+        segments = [segment for segment in request.path.split("/") if segment]
+        try:
+            question_id = int(segments[2])
+        except (ValueError, IndexError):
+            return response(start_response, "Not Found", "<section class='panel'><p>Question not found.</p></section>", user, status="404 Not Found")
+        action = segments[3] if len(segments) > 3 else ""
+        status = "approved" if action == "approve" else "rejected" if action == "reject" else ""
+        ok, note = set_question_review_status(conn, question_id, status, user["id"])
+        material_row = conn.execute(
+            """
+            SELECT topics.material_id
+            FROM questions
+            JOIN concepts ON concepts.id = questions.concept_id
+            JOIN topics ON topics.id = concepts.topic_id
+            WHERE questions.id = ?
+            """,
+            (question_id,),
+        ).fetchone()
+        if material_row:
+            title, body = admin_material_review(conn, user, material_row["material_id"], flash=note if ok else "", errors=None if ok else [note])
+            return response(start_response, title, body, user, status="200 OK" if ok else "400 Bad Request")
+        title, body = admin_dashboard(conn, user, flash=note if ok else "", errors=None if ok else [note])
+        return response(start_response, title, body, user, status="200 OK" if ok else "400 Bad Request")
 
     if request.path == "/parent" and request.method == "GET":
         user = require_user(conn, request, "parent")

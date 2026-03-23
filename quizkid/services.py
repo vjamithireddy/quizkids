@@ -138,8 +138,8 @@ def seed_demo_data(conn: sqlite3.Connection) -> None:
     ).lastrowid
     topic_id = conn.execute(
         """
-        INSERT INTO topics (material_id, subject_name, chapter_name, topic_name, summary, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO topics (material_id, subject_name, chapter_name, topic_name, summary, review_status, created_at)
+        VALUES (?, ?, ?, ?, ?, 'approved', ?)
         """,
         (
             material_id,
@@ -267,8 +267,8 @@ def seed_demo_data(conn: sqlite3.Connection) -> None:
         conn.execute(
             """
             INSERT INTO questions
-                (concept_id, prompt, choice_a, choice_b, choice_c, choice_d, correct_choice, explanation, hint_text, difficulty_level, question_variant_group, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (concept_id, prompt, choice_a, choice_b, choice_c, choice_d, correct_choice, explanation, hint_text, difficulty_level, question_variant_group, review_status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?)
             """,
             (*row, now),
         )
@@ -470,8 +470,8 @@ def generate_content_from_material(conn: sqlite3.Connection, material_id: int, t
     summary = chunks[0][:220]
     topic_id = conn.execute(
         """
-        INSERT INTO topics (material_id, subject_name, chapter_name, topic_name, summary, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO topics (material_id, subject_name, chapter_name, topic_name, summary, review_status, created_at)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?)
         """,
         (material_id, subject_name, chapter_name, topic_name, summary, now),
     ).lastrowid
@@ -509,8 +509,8 @@ def generate_content_from_material(conn: sqlite3.Connection, material_id: int, t
         conn.execute(
             """
             INSERT INTO questions
-                (concept_id, prompt, choice_a, choice_b, choice_c, choice_d, correct_choice, explanation, hint_text, difficulty_level, question_variant_group, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (concept_id, prompt, choice_a, choice_b, choice_c, choice_d, correct_choice, explanation, hint_text, difficulty_level, question_variant_group, review_status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
             """,
             (
                 concept_id,
@@ -597,6 +597,54 @@ def list_material_questions(conn: sqlite3.Connection, material_id: int) -> list[
     ).fetchall()
 
 
+def set_topic_review_status(conn: sqlite3.Connection, topic_id: int, review_status: str, actor_user_id: int) -> tuple[bool, str]:
+    if review_status not in {"approved", "rejected", "pending"}:
+        return False, "Unsupported review status."
+    topic = conn.execute("SELECT * FROM topics WHERE id = ?", (topic_id,)).fetchone()
+    if not topic:
+        return False, "Topic not found."
+    now = utcnow()
+    conn.execute("UPDATE topics SET review_status = ? WHERE id = ?", (review_status, topic_id))
+    if review_status != "approved":
+        conn.execute(
+            """
+            UPDATE questions
+            SET review_status = 'rejected', active = 0
+            WHERE concept_id IN (SELECT id FROM concepts WHERE topic_id = ?)
+            """,
+            (topic_id,),
+        )
+    conn.execute(
+        """
+        INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, details, created_at)
+        VALUES (?, 'review_topic', 'topic', ?, ?, ?)
+        """,
+        (actor_user_id, str(topic_id), f"Marked topic as {review_status}.", now),
+    )
+    conn.commit()
+    return True, f"Topic marked as {review_status}."
+
+
+def set_question_review_status(conn: sqlite3.Connection, question_id: int, review_status: str, actor_user_id: int) -> tuple[bool, str]:
+    if review_status not in {"approved", "rejected", "pending"}:
+        return False, "Unsupported review status."
+    question = conn.execute("SELECT * FROM questions WHERE id = ?", (question_id,)).fetchone()
+    if not question:
+        return False, "Question not found."
+    now = utcnow()
+    active = 1 if review_status == "approved" else 0
+    conn.execute("UPDATE questions SET review_status = ?, active = ? WHERE id = ?", (review_status, active, question_id))
+    conn.execute(
+        """
+        INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, details, created_at)
+        VALUES (?, 'review_question', 'question', ?, ?, ?)
+        """,
+        (actor_user_id, str(question_id), f"Marked question as {review_status}.", now),
+    )
+    conn.commit()
+    return True, f"Question marked as {review_status}."
+
+
 def clear_generated_content(conn: sqlite3.Connection, material_id: int) -> None:
     conn.execute("DELETE FROM topics WHERE material_id = ?", (material_id,))
     conn.commit()
@@ -670,6 +718,7 @@ def list_topics_for_kid(conn: sqlite3.Connection, kid_profile_id: int) -> list[s
         FROM topics
         LEFT JOIN mastery_scores
           ON mastery_scores.topic_id = topics.id AND mastery_scores.kid_profile_id = ?
+        WHERE topics.review_status = 'approved'
         ORDER BY topics.subject_name, topics.chapter_name, topics.topic_name
         """,
         (kid_profile_id,),
@@ -737,7 +786,8 @@ def choose_questions_for_attempt(conn: sqlite3.Connection, kid_profile_id: int, 
         SELECT questions.*, concepts.concept_title, concepts.explanation AS concept_explanation, concepts.example_text
         FROM questions
         JOIN concepts ON concepts.id = questions.concept_id
-        WHERE concepts.topic_id = ? AND questions.active = 1
+        JOIN topics ON topics.id = concepts.topic_id
+        WHERE concepts.topic_id = ? AND topics.review_status = 'approved' AND questions.active = 1 AND questions.review_status = 'approved'
         ORDER BY ABS(questions.difficulty_level - ?) ASC, questions.id ASC
         """,
         (topic_id, skill_level),
