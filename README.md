@@ -38,6 +38,7 @@ This repository is intentionally dependency-light so it can run on a simple Host
   - signed session cookies
   - role checks
   - admin audit logging
+  - bounded upload size enforced in nginx and the app
 
 ## Startup modes
 

@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from .config import UPLOAD_DIR
+from .config import MAX_UPLOAD_BYTES, UPLOAD_DIR
 from .security import hash_password, new_session_id
 
 
@@ -20,7 +20,6 @@ SUPPORTED_MIME_TYPES = {
 }
 
 TEXT_MIME_TYPES = {"text/plain"}
-MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -366,7 +365,7 @@ def validate_material_upload(filename: str, mime_type: str, payload: bytes) -> l
     if not payload:
         notes.append("The uploaded file is empty.")
     if len(payload) > MAX_UPLOAD_BYTES:
-        notes.append("The uploaded file is too large for the starter app.")
+        notes.append(f"The uploaded file is too large. Limit is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.")
     return notes
 
 

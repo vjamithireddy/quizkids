@@ -11,3 +11,4 @@ DB_PATH = Path(os.environ.get("QUIZKID_DB_PATH", str(DATA_DIR / "quizkid.sqlite3
 APP_ENV = os.environ.get("APP_ENV", "development").strip().lower()
 COOKIE_SECURE = APP_ENV == "production"
 SEED_DEMO_DATA = os.environ.get("QUIZKID_SEED_DEMO", "0") == "1"
+MAX_UPLOAD_BYTES = int(os.environ.get("QUIZKID_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
