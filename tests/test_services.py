@@ -13,6 +13,7 @@ from quizkid.services import (
     create_kid_profile,
     create_material,
     delete_material,
+    delete_kid_profile,
     get_attempt_progress,
     get_kid_assigned_material_ids,
     get_material,
@@ -177,6 +178,21 @@ class QuizKidProductionSetupTests(unittest.TestCase):
         kid_id, errors = create_kid_profile(self.conn, self.parent_user_id, "  maya  ", "Ages 8-10", 2)
         self.assertIsNone(kid_id)
         self.assertEqual(errors, ["A kid profile with that name already exists."])
+
+    def test_parent_can_delete_kid_profile(self) -> None:
+        ok, note = delete_kid_profile(self.conn, self.parent_user_id, self.kid_id)
+        self.assertTrue(ok)
+        self.assertIn("was deleted", note)
+        self.assertIsNone(self.conn.execute("SELECT * FROM kid_profiles WHERE id = ?", (self.kid_id,)).fetchone())
+
+    def test_parent_cannot_delete_other_parents_kid(self) -> None:
+        other_parent, _ = register_parent_account(self.conn, "other@example.com", "parentpass1", "Parent Two")
+        other_kid_id, errors = create_kid_profile(self.conn, other_parent["id"], "Riya", "Ages 8-10", 2)
+        self.assertIsNotNone(other_kid_id)
+        self.assertEqual(errors, [])
+        ok, note = delete_kid_profile(self.conn, self.parent_user_id, other_kid_id)
+        self.assertFalse(ok)
+        self.assertEqual(note, "Kid profile not found.")
 
     def test_material_upload_is_persisted_to_disk(self) -> None:
         ok, _ = create_material(

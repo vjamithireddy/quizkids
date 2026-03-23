@@ -470,6 +470,15 @@ def assign_courses_to_kid(conn: sqlite3.Connection, parent_user_id: int, kid_pro
     return True, "Courses assigned."
 
 
+def delete_kid_profile(conn: sqlite3.Connection, parent_user_id: int, kid_profile_id: int) -> tuple[bool, str]:
+    kid = get_kid_profile(conn, kid_profile_id, parent_user_id)
+    if not kid:
+        return False, "Kid profile not found."
+    conn.execute("DELETE FROM kid_profiles WHERE id = ? AND parent_user_id = ?", (kid_profile_id, parent_user_id))
+    conn.commit()
+    return True, f"{kid['display_name']} was deleted."
+
+
 def list_materials(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
         """

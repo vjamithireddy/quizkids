@@ -19,6 +19,7 @@ from .services import (
     create_kid_profile,
     create_material,
     delete_material,
+    delete_kid_profile,
     create_session,
     destroy_session,
     get_attempt,
@@ -832,7 +833,10 @@ def parent_dashboard(conn: sqlite3.Connection, user: sqlite3.Row, flash: str = "
             "<div class='panel'>"
             f"<h2>{html_escape(kid['display_name'])}</h2>"
             f"<p>Age band: {html_escape(kid['age_band'])}<br>Current skill level: {kid['current_skill_level']}</p>"
-            f"<div class='row'><a class='button secondary' href='/kid/{kid['id']}'>Open Kid Learning Path</a></div>"
+            f"<div class='row'><a class='button secondary' href='/kid/{kid['id']}'>Open Kid Learning Path</a>"
+            f"<form method='post' action='/parent/kids/{kid['id']}/delete' onsubmit=\"return confirm('Delete this kid profile and all saved progress?');\">"
+            "<button class='danger' type='submit'>Delete Kid Profile</button>"
+            "</form></div>"
             "<h3>Assigned Courses</h3>"
             f"<ul>{assigned_list}</ul>"
             f"<form method='post' action='/parent/kids/{kid['id']}/assign-courses'>"
@@ -1330,6 +1334,10 @@ def app(environ: dict, start_response: Callable):
                 except ValueError:
                     continue
             ok, note = assign_courses_to_kid(conn, user["id"], kid_id, material_ids)
+            param = "flash" if ok else "error"
+            return redirect(start_response, f"/parent?{param}={quote_plus(note)}")
+        if len(segments) == 4 and segments[3] == "delete":
+            ok, note = delete_kid_profile(conn, user["id"], kid_id)
             param = "flash" if ok else "error"
             return redirect(start_response, f"/parent?{param}={quote_plus(note)}")
 
