@@ -10,12 +10,15 @@ from quizkid.services import (
     choose_questions_for_attempt,
     create_initial_admin,
     create_material,
+    delete_material,
     get_attempt_progress,
+    get_material,
     has_admin_account,
     list_topics_for_kid,
     maybe_complete_attempt,
     record_answer,
     register_parent_account,
+    regenerate_material,
     recommend_next_skill,
     seed_demo_data,
     start_quiz_attempt,
@@ -148,6 +151,43 @@ class QuizKidProductionSetupTests(unittest.TestCase):
 
         self.assertEqual(status, "stored")
         self.assertIn("dependency is not installed", extracted)
+
+    def test_delete_material_removes_file_and_row(self) -> None:
+        admin_user, _ = create_initial_admin(self.conn, "owner@example.com", "supersecure1", "Owner")
+        create_material(
+            self.conn,
+            admin_user["id"],
+            "Animals Intro",
+            "animals.txt",
+            "text/plain",
+            b"Mammals feed milk.\nBirds have feathers.\nFish live in water.",
+        )
+        material = self.conn.execute("SELECT * FROM course_materials ORDER BY id DESC LIMIT 1").fetchone()
+        stored_path = Path(material["stored_file_path"])
+        self.assertTrue(stored_path.exists())
+        ok, _ = delete_material(self.conn, material["id"], admin_user["id"])
+        self.assertTrue(ok)
+        self.assertFalse(stored_path.exists())
+        self.assertIsNone(get_material(self.conn, material["id"]))
+
+    def test_regenerate_material_rebuilds_topics(self) -> None:
+        admin_user, _ = create_initial_admin(self.conn, "owner@example.com", "supersecure1", "Owner")
+        create_material(
+            self.conn,
+            admin_user["id"],
+            "Plants Intro",
+            "plants.txt",
+            "text/plain",
+            b"Plants need sunlight.\nRoots absorb water.\nLeaves make food.\nStems support the plant.",
+        )
+        material = self.conn.execute("SELECT * FROM course_materials ORDER BY id DESC LIMIT 1").fetchone()
+        self.conn.execute("DELETE FROM topics WHERE material_id = ?", (material["id"],))
+        self.conn.commit()
+        ok, note = regenerate_material(self.conn, material["id"], admin_user["id"])
+        topic_count = self.conn.execute("SELECT COUNT(*) FROM topics WHERE material_id = ?", (material["id"],)).fetchone()[0]
+        self.assertTrue(ok)
+        self.assertIn("Generated automatically", note)
+        self.assertGreater(topic_count, 0)
 
 
 if __name__ == "__main__":

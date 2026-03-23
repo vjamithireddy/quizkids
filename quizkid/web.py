@@ -17,22 +17,27 @@ from .services import (
     create_initial_admin,
     create_kid_profile,
     create_material,
+    delete_material,
     create_session,
     destroy_session,
     get_attempt,
     get_attempt_progress,
     get_kid_profile,
+    get_material,
+    get_material_topics,
     get_mastery_rows_for_parent,
     get_recent_attempts,
     get_session_user,
     get_topic,
     get_topic_concepts,
     has_admin_account,
+    list_material_questions,
     list_materials,
     list_parent_kids,
     list_topics_for_kid,
     next_question_for_attempt,
     record_answer,
+    regenerate_material,
     register_parent_account,
     seed_demo_data,
     start_quiz_attempt,
@@ -70,6 +75,7 @@ body {
 a { color: var(--accent-2); text-decoration: none; }
 a:hover { text-decoration: underline; }
 .shell { max-width: 1100px; margin: 0 auto; padding: 24px; }
+.app-busy { overflow: hidden; user-select: none; }
 .hero {
   display: grid;
   gap: 18px;
@@ -160,6 +166,7 @@ table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 10px 6px; border-bottom: 1px dashed var(--line); }
 th { color: #315270; }
 .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.row.wrap { align-items: flex-start; }
 .flash {
   padding: 13px 15px;
   border-radius: 16px;
@@ -197,6 +204,65 @@ summary {
   cursor: pointer;
   font-weight: 700;
   color: #2a4d72;
+}
+.material-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.material-actions form {
+  display: inline-block;
+}
+.button.ghost, button.ghost {
+  background: white;
+  color: var(--accent-2);
+  border: 2px solid #cfe5f4;
+  box-shadow: none;
+}
+.button.danger, button.danger {
+  background: linear-gradient(135deg, #ef6a62, #d95d39);
+}
+.source-preview {
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  border: 2px dashed #d8ebf7;
+  border-radius: 16px;
+  padding: 14px;
+  background: rgba(255,255,255,0.72);
+}
+.busy-overlay {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(223, 244, 255, 0.82);
+  backdrop-filter: blur(6px);
+  z-index: 9999;
+}
+.busy-overlay.visible { display: flex; }
+.busy-card {
+  width: min(460px, 92vw);
+  padding: 26px;
+  border-radius: 28px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(255,249,232,0.94));
+  border: 2px solid rgba(255,255,255,0.95);
+  box-shadow: 0 18px 40px rgba(46, 87, 125, 0.14);
+  text-align: center;
+}
+.busy-spinner {
+  width: 58px;
+  height: 58px;
+  margin: 0 auto 16px;
+  border-radius: 50%;
+  border: 6px solid rgba(47, 158, 216, 0.18);
+  border-top-color: var(--accent);
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 @media (max-width: 720px) {
   .shell { padding: 14px; }
@@ -302,6 +368,13 @@ def page(title: str, body: str, user: sqlite3.Row | None = None) -> bytes:
       <style>{STYLE}</style>
     </head>
     <body>
+      <div id="busy-overlay" class="busy-overlay" aria-hidden="true">
+        <div class="busy-card">
+          <div class="busy-spinner"></div>
+          <h2>Uploading and building quiz material</h2>
+          <p>Please wait. QuizKid is saving the file and generating topics, concepts, and questions.</p>
+        </div>
+      </div>
       <div class="shell">
         <div class="topbar">
           <a href="/"><strong>QuizKid</strong></a>
@@ -309,6 +382,22 @@ def page(title: str, body: str, user: sqlite3.Row | None = None) -> bytes:
         </div>
         {body}
       </div>
+      <script>
+        (function () {{
+          var overlay = document.getElementById('busy-overlay');
+          function showBusy() {{
+            if (!overlay) return;
+            overlay.classList.add('visible');
+            overlay.setAttribute('aria-hidden', 'false');
+            document.body.classList.add('app-busy');
+          }}
+          document.querySelectorAll('form[data-busy]').forEach(function (form) {{
+            form.addEventListener('submit', function () {{
+              showBusy();
+            }});
+          }});
+        }})();
+      </script>
     </body>
     </html>
     """
@@ -338,6 +427,21 @@ def response(start_response: Callable, title: str, body: str, user: sqlite3.Row 
         response_headers.extend(headers)
     start_response(status, response_headers)
     return [page(title, body, user)]
+
+
+def binary_response(
+    start_response: Callable,
+    payload: bytes,
+    *,
+    content_type: str,
+    filename: str | None = None,
+    status: str = "200 OK",
+) -> list[bytes]:
+    headers = [("Content-Type", content_type), ("Content-Length", str(len(payload)))]
+    if filename:
+        headers.append(("Content-Disposition", f'attachment; filename="{filename}"'))
+    start_response(status, headers)
+    return [payload]
 
 
 def current_user(conn: sqlite3.Connection, request: Request) -> sqlite3.Row | None:
@@ -437,6 +541,14 @@ def admin_dashboard(conn: sqlite3.Connection, user: sqlite3.Row, flash: str = ""
             f"<td>{material['quality_score']:.2f}</td>"
             f"<td>{html_escape(summarize_generation_risk(material))}</td>"
             f"<td>{html_escape(material['validation_notes'])}</td>"
+            "<td>"
+            "<div class='material-actions'>"
+            f"<a class='button ghost' href='/admin/materials/{material['id']}'>Review</a>"
+            f"<a class='button ghost' href='/admin/materials/{material['id']}/download'>Download</a>"
+            f"<form method='post' action='/admin/materials/{material['id']}/regenerate'><button class='secondary' type='submit'>Regenerate</button></form>"
+            f"<form method='post' action='/admin/materials/{material['id']}/delete' onsubmit=\"return confirm('Delete this material and all generated content?');\"><button class='danger' type='submit'>Delete</button></form>"
+            "</div>"
+            "</td>"
             "</tr>"
         )
     body = f"""
@@ -450,23 +562,103 @@ def admin_dashboard(conn: sqlite3.Connection, user: sqlite3.Row, flash: str = ""
     <div class="grid">
       <section class="panel">
         <h2>Upload Material</h2>
-        <form method="post" action="/admin/upload" enctype="multipart/form-data">
+        <form method="post" action="/admin/upload" enctype="multipart/form-data" data-busy="upload">
           <label>Title <input name="title" required></label>
           <label>Course File <input name="material" type="file" required></label>
           <button type="submit">Upload and Generate</button>
         </form>
-        <p class="muted">The starter app extracts plain text directly. PDF/DOC files are stored and given placeholder extraction notes until external parsers are added.</p>
+        <p class="muted">After upload, use Review to inspect the extracted source, generated topics, concepts, and questions before relying on the material.</p>
       </section>
       <section class="panel">
         <h2>Generated Materials</h2>
         <table>
-          <thead><tr><th>Title</th><th>Original File</th><th>Stored File</th><th>Status</th><th>Quality</th><th>Risk</th><th>Notes</th></tr></thead>
-          <tbody>{''.join(rows) or '<tr><td colspan=\"7\">No materials uploaded yet.</td></tr>'}</tbody>
+          <thead><tr><th>Title</th><th>Original File</th><th>Stored File</th><th>Status</th><th>Quality</th><th>Risk</th><th>Notes</th><th>Actions</th></tr></thead>
+          <tbody>{''.join(rows) or '<tr><td colspan=\"8\">No materials uploaded yet.</td></tr>'}</tbody>
         </table>
       </section>
     </div>
     """
     return "Admin Dashboard", body
+
+
+def admin_material_review(conn: sqlite3.Connection, user: sqlite3.Row, material_id: int, flash: str = "", errors: list[str] | None = None) -> tuple[str, str]:
+    material = get_material(conn, material_id)
+    if not material:
+        return "Material Not Found", "<section class='panel'><p>Material not found.</p></section>"
+    topics = get_material_topics(conn, material_id)
+    questions = list_material_questions(conn, material_id)
+    flash_html = f"<div class='flash'>{html_escape(flash)}</div>" if flash else ""
+    error_html = "".join(f"<div class='flash error'>{html_escape(err)}</div>" for err in (errors or []))
+    topic_cards = []
+    for topic in topics:
+        concepts = get_topic_concepts(conn, topic["id"])
+        concept_html = "".join(
+            "<details>"
+            f"<summary>{html_escape(concept['concept_title'])}</summary>"
+            f"<p>{html_escape(concept['explanation'])}</p>"
+            f"<p><strong>Example:</strong> {html_escape(concept['example_text'])}</p>"
+            "</details>"
+            for concept in concepts
+        ) or "<p>No concepts generated yet.</p>"
+        topic_cards.append(
+            "<section class='panel'>"
+            f"<span class='tag'>{html_escape(topic['chapter_name'])}</span>"
+            f"<h2>{html_escape(topic['topic_name'])}</h2>"
+            f"<p>{html_escape(topic['summary'])}</p>"
+            f"{concept_html}"
+            "</section>"
+        )
+    question_rows = "".join(
+        "<tr>"
+        f"<td>{html_escape(row['topic_name'])}</td>"
+        f"<td>{html_escape(row['concept_title'])}</td>"
+        f"<td>{html_escape(row['prompt'])}</td>"
+        f"<td>{row['difficulty_level']}</td>"
+        "</tr>"
+        for row in questions[:20]
+    )
+    body = f"""
+    <section class="hero">
+      <span class="tag">Material Review</span>
+      <h1>{html_escape(material['title'])}</h1>
+      <p>This is where admin review happens. Inspect the extracted text and generated quiz structure before keeping the material in rotation.</p>
+      {flash_html}
+      {error_html}
+      <div class="row wrap">
+        <span class="badge">Status: {html_escape(material['generation_status'])}</span>
+        <span class="badge">Quality: {material['quality_score']:.2f}</span>
+        <span class="badge">Risk: {html_escape(summarize_generation_risk(material))}</span>
+        <a class="button ghost" href="/admin/materials/{material['id']}/download">Download Source</a>
+        <form method="post" action="/admin/materials/{material['id']}/regenerate"><button class="secondary" type="submit">Regenerate</button></form>
+        <form method="post" action="/admin/materials/{material['id']}/delete" onsubmit="return confirm('Delete this material and all generated content?');"><button class="danger" type="submit">Delete</button></form>
+        <a class="button ghost" href="/admin">Back to Admin</a>
+      </div>
+    </section>
+    <div class="grid">
+      <section class="panel">
+        <h2>File Management</h2>
+        <p><strong>Original file:</strong> {html_escape(material['filename'])}</p>
+        <p><strong>Stored file:</strong> {html_escape(material['stored_filename'] or '-')}</p>
+        <p><strong>Extraction status:</strong> {html_escape(material['extraction_status'])}</p>
+        <p><strong>Notes:</strong> {html_escape(material['validation_notes'])}</p>
+      </section>
+      <section class="panel">
+        <h2>Extracted Source Preview</h2>
+        <div class="source-preview">{html_escape(material['source_text'][:6000]) or 'No extracted text available.'}</div>
+      </section>
+    </div>
+    <div class="grid">
+      {''.join(topic_cards) or "<section class='panel'><h2>No generated topics</h2><p>This material does not have generated topics yet.</p></section>"}
+    </div>
+    <section class="panel">
+      <h2>Generated Questions</h2>
+      <table>
+        <thead><tr><th>Topic</th><th>Concept</th><th>Prompt</th><th>Difficulty</th></tr></thead>
+        <tbody>{question_rows or '<tr><td colspan=\"4\">No generated questions yet.</td></tr>'}</tbody>
+      </table>
+    </section>
+    """
+    return "Material Review", body
 
 
 def parent_dashboard(conn: sqlite3.Connection, user: sqlite3.Row, flash: str = "", errors: list[str] | None = None) -> tuple[str, str]:
@@ -777,6 +969,47 @@ def app(environ: dict, start_response: Callable):
         )
         title, body = admin_dashboard(conn, user, flash=notes[0] if ok else "", errors=None if ok else notes)
         return response(start_response, title, body, user, status="200 OK" if ok else "400 Bad Request")
+
+    if request.path.startswith("/admin/materials/"):
+        user = require_user(conn, request, "admin")
+        if not user:
+            return redirect(start_response, "/")
+        segments = [segment for segment in request.path.split("/") if segment]
+        try:
+            material_id = int(segments[2])
+        except (ValueError, IndexError):
+            return response(start_response, "Not Found", "<section class='panel'><p>Material not found.</p></section>", user, status="404 Not Found")
+
+        if len(segments) == 3 and request.method == "GET":
+            title, body = admin_material_review(conn, user, material_id)
+            return response(start_response, title, body, user)
+
+        if len(segments) == 4 and segments[3] == "download" and request.method == "GET":
+            material = get_material(conn, material_id)
+            if not material or not material["stored_file_path"]:
+                return response(start_response, "Not Found", "<section class='panel'><p>Stored file not found.</p></section>", user, status="404 Not Found")
+            path = Path(material["stored_file_path"])
+            if not path.exists():
+                return response(start_response, "Not Found", "<section class='panel'><p>Stored file is missing from disk.</p></section>", user, status="404 Not Found")
+            return binary_response(
+                start_response,
+                path.read_bytes(),
+                content_type=material["mime_type"] or "application/octet-stream",
+                filename=material["filename"],
+            )
+
+        if len(segments) == 4 and segments[3] == "regenerate" and request.method == "POST":
+            ok, note = regenerate_material(conn, material_id, user["id"])
+            title, body = admin_material_review(conn, user, material_id, flash=note if ok else "", errors=None if ok else [note])
+            return response(start_response, title, body, user, status="200 OK" if ok else "400 Bad Request")
+
+        if len(segments) == 4 and segments[3] == "delete" and request.method == "POST":
+            ok, note = delete_material(conn, material_id, user["id"])
+            if ok:
+                title, body = admin_dashboard(conn, user, flash=note)
+                return response(start_response, title, body, user)
+            title, body = admin_dashboard(conn, user, errors=[note])
+            return response(start_response, title, body, user, status="400 Bad Request")
 
     if request.path == "/parent" and request.method == "GET":
         user = require_user(conn, request, "parent")

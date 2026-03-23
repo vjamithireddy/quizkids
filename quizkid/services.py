@@ -350,6 +350,18 @@ def list_materials(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def get_material(conn: sqlite3.Connection, material_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT course_materials.*, users.display_name AS uploader_name
+        FROM course_materials
+        JOIN users ON users.id = course_materials.uploaded_by
+        WHERE course_materials.id = ?
+        """,
+        (material_id,),
+    ).fetchone()
+
+
 def get_material_topics(conn: sqlite3.Connection, material_id: int) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM topics WHERE material_id = ? ORDER BY topic_name",
@@ -569,6 +581,84 @@ def create_material(conn: sqlite3.Connection, user_id: int, title: str, filename
     )
     conn.commit()
     return True, [validation_notes]
+
+
+def list_material_questions(conn: sqlite3.Connection, material_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT questions.*, concepts.concept_title, topics.topic_name
+        FROM questions
+        JOIN concepts ON concepts.id = questions.concept_id
+        JOIN topics ON topics.id = concepts.topic_id
+        WHERE topics.material_id = ?
+        ORDER BY topics.topic_name, concepts.concept_title, questions.id
+        """,
+        (material_id,),
+    ).fetchall()
+
+
+def clear_generated_content(conn: sqlite3.Connection, material_id: int) -> None:
+    conn.execute("DELETE FROM topics WHERE material_id = ?", (material_id,))
+    conn.commit()
+
+
+def regenerate_material(conn: sqlite3.Connection, material_id: int, actor_user_id: int) -> tuple[bool, str]:
+    material = get_material(conn, material_id)
+    if not material:
+        return False, "Material not found."
+
+    clear_generated_content(conn, material_id)
+    generation_status, quality_score = generate_content_from_material(conn, material_id, material["title"], material["source_text"])
+    validation_notes = (
+        "Generated automatically. Review quality score and generated topics."
+        if generation_status == "generated"
+        else "Material stored but generated content was quarantined because source structure was too weak."
+    )
+    now = utcnow()
+    conn.execute(
+        """
+        UPDATE course_materials
+        SET generation_status = ?, quality_score = ?, validation_notes = ?
+        WHERE id = ?
+        """,
+        (generation_status, quality_score, validation_notes, material_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, details, created_at)
+        VALUES (?, 'regenerate_material', 'course_material', ?, ?, ?)
+        """,
+        (actor_user_id, str(material_id), f"Regenerated {material['filename']} with status {generation_status}.", now),
+    )
+    conn.commit()
+    return True, validation_notes
+
+
+def delete_material(conn: sqlite3.Connection, material_id: int, actor_user_id: int) -> tuple[bool, str]:
+    material = get_material(conn, material_id)
+    if not material:
+        return False, "Material not found."
+
+    stored_file_path = material["stored_file_path"]
+    if stored_file_path:
+        try:
+            path = Path(stored_file_path)
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
+
+    now = utcnow()
+    conn.execute(
+        """
+        INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, details, created_at)
+        VALUES (?, 'delete_material', 'course_material', ?, ?, ?)
+        """,
+        (actor_user_id, str(material_id), f"Deleted {material['filename']}.", now),
+    )
+    conn.execute("DELETE FROM course_materials WHERE id = ?", (material_id,))
+    conn.commit()
+    return True, "Material deleted."
 
 
 def list_topics_for_kid(conn: sqlite3.Connection, kid_profile_id: int) -> list[sqlite3.Row]:
