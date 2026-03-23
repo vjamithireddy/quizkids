@@ -508,28 +508,139 @@ def landing_view(request: Request, admin_ready: bool, flash: str = "", errors: l
       {error_html}
       <div class="grid">
         <div class="panel">
-          <h2>Sign In</h2>
-          <form method="post" action="/login">
-            <label>Email <input name="email" type="email" required></label>
-            <label>Password <input name="password" type="password" required></label>
-            <button type="submit">Continue</button>
-          </form>
+          <h2>Parent Area</h2>
+          <p>Already have a parent account? Sign in here. New families should create a parent account first.</p>
+          <div class="row">
+            <a class="button secondary" href="/parent/login">Parent Login</a>
+            <a class="button" href="/parent/register">Create Parent Account</a>
+          </div>
         </div>
         <div class="panel">
-          <h2>Parent Registration</h2>
+          <h2>Admin Area</h2>
+          <p>Admins use a separate login and manage uploaded course material, review generated content, and publish approved topics.</p>
+          <div class="row">
+            <a class="button ghost" href="/admin/login">Admin Login</a>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>What Parents Do Here</h2>
           {signup_error_html}
-          <form method="post" action="/register/parent">
-            <label>Display Name <input name="display_name" required></label>
-            <label>Email <input name="email" type="email" required></label>
-            <label>Password <input name="password" type="password" minlength="10" required></label>
-            <button type="submit">Create Parent Account</button>
-          </form>
-          <p class="muted">Parents can register themselves, then create kid profiles and track topic mastery.</p>
+          <p class="muted">After signing in, parents create kid profiles, assign approved courses, and launch each child into their learning path.</p>
         </div>
       </div>
     </section>
     """
     return "QuizKid", body
+
+
+def auth_view(
+    heading_tag: str,
+    title_text: str,
+    intro_text: str,
+    form_html: str,
+    companion_html: str,
+    *,
+    flash: str = "",
+    errors: list[str] | None = None,
+) -> tuple[str, str]:
+    flash_html = f"<div class='flash'>{html_escape(flash)}</div>" if flash else ""
+    error_html = "".join(f"<div class='flash error'>{html_escape(err)}</div>" for err in (errors or []))
+    body = f"""
+    <section class="hero">
+      <span class="tag">{html_escape(heading_tag)}</span>
+      <h1>{html_escape(title_text)}</h1>
+      <p>{html_escape(intro_text)}</p>
+      {flash_html}
+      {error_html}
+      <div class="grid">
+        <section class="panel">
+          {form_html}
+        </section>
+        <section class="panel">
+          {companion_html}
+        </section>
+      </div>
+    </section>
+    """
+    return title_text, body
+
+
+def parent_login_view(flash: str = "", errors: list[str] | None = None) -> tuple[str, str]:
+    return auth_view(
+        "Parent Login",
+        "Sign in as a parent",
+        "Use your parent email and password to manage kid profiles, assign courses, and review progress.",
+        """
+        <h2>Parent Login</h2>
+        <form method="post" action="/parent/login">
+          <label>Email <input name="email" type="email" required></label>
+          <label>Password <input name="password" type="password" required></label>
+          <button type="submit">Go To Parent Dashboard</button>
+        </form>
+        """,
+        """
+        <h2>Need a parent account?</h2>
+        <p>Create a parent account first, then come back here to sign in.</p>
+        <div class="row">
+          <a class="button" href="/parent/register">Create Parent Account</a>
+          <a class="button ghost" href="/">Back Home</a>
+        </div>
+        """,
+        flash=flash,
+        errors=errors,
+    )
+
+
+def parent_register_view(flash: str = "", errors: list[str] | None = None) -> tuple[str, str]:
+    return auth_view(
+        "Parent Registration",
+        "Create a parent account",
+        "Start here if you are a parent new to QuizKid. After signup, you will go straight to the parent dashboard.",
+        """
+        <h2>Create Parent Account</h2>
+        <form method="post" action="/parent/register">
+          <label>Display Name <input name="display_name" required></label>
+          <label>Email <input name="email" type="email" required></label>
+          <label>Password <input name="password" type="password" minlength="10" required></label>
+          <button type="submit">Create Parent Account</button>
+        </form>
+        """,
+        """
+        <h2>Already registered?</h2>
+        <p>Use the parent login page if your account already exists.</p>
+        <div class="row">
+          <a class="button secondary" href="/parent/login">Parent Login</a>
+          <a class="button ghost" href="/">Back Home</a>
+        </div>
+        """,
+        flash=flash,
+        errors=errors,
+    )
+
+
+def admin_login_view(flash: str = "", errors: list[str] | None = None) -> tuple[str, str]:
+    return auth_view(
+        "Admin Login",
+        "Sign in as an admin",
+        "Admins upload source material, review generated topics and questions, and publish course content for families.",
+        """
+        <h2>Admin Login</h2>
+        <form method="post" action="/admin/login">
+          <label>Email <input name="email" type="email" required></label>
+          <label>Password <input name="password" type="password" required></label>
+          <button type="submit">Go To Admin Console</button>
+        </form>
+        """,
+        """
+        <h2>First time setup</h2>
+        <p>If this server does not have an admin account yet, go back to the home page and complete first-run setup.</p>
+        <div class="row">
+          <a class="button ghost" href="/">Back Home</a>
+        </div>
+        """,
+        flash=flash,
+        errors=errors,
+    )
 
 
 def admin_dashboard(conn: sqlite3.Connection, user: sqlite3.Row, flash: str = "", errors: list[str] | None = None) -> tuple[str, str]:
@@ -921,6 +1032,27 @@ def app(environ: dict, start_response: Callable):
         title, body = landing_view(request, admin_ready)
         return response(start_response, title, body, user)
 
+    if request.path == "/parent/login" and request.method == "GET":
+        if not admin_ready:
+            title, body = landing_view(request, False, errors=["Create the first admin account before parents can sign in."])
+            return response(start_response, title, body, status="400 Bad Request")
+        title, body = parent_login_view()
+        return response(start_response, title, body, user)
+
+    if request.path == "/parent/register" and request.method == "GET":
+        if not admin_ready:
+            title, body = landing_view(request, False, errors=["Create the first admin account before registering parents."])
+            return response(start_response, title, body, status="400 Bad Request")
+        title, body = parent_register_view()
+        return response(start_response, title, body, user)
+
+    if request.path == "/admin/login" and request.method == "GET":
+        if not admin_ready:
+            title, body = landing_view(request, False, errors=["Create the first admin account before admins can sign in."])
+            return response(start_response, title, body, status="400 Bad Request")
+        title, body = admin_login_view()
+        return response(start_response, title, body, user)
+
     if request.path == "/setup/admin" and request.method == "POST":
         form, _ = request.form()
         new_admin, errors = create_initial_admin(
@@ -951,6 +1083,32 @@ def app(environ: dict, start_response: Callable):
         location = "/admin" if auth_user["role"] == "admin" else "/parent"
         return redirect(start_response, location, headers)
 
+    if request.path == "/parent/login" and request.method == "POST":
+        if not admin_ready:
+            title, body = landing_view(request, False, errors=["Create the first admin account before parents can sign in."])
+            return response(start_response, title, body, status="400 Bad Request")
+        form, _ = request.form()
+        auth_user = authenticate_user(conn, form.get("email", ""), form.get("password", ""))
+        if not auth_user or auth_user["role"] != "parent":
+            title, body = parent_login_view(errors=["Parent email or password is incorrect."])
+            return response(start_response, title, body, status="401 Unauthorized")
+        session_id = create_session(conn, auth_user["id"])
+        token = make_session_token(session_id)
+        return redirect(start_response, "/parent", [session_cookie_header(token)])
+
+    if request.path == "/admin/login" and request.method == "POST":
+        if not admin_ready:
+            title, body = landing_view(request, False, errors=["Create the first admin account before admins can sign in."])
+            return response(start_response, title, body, status="400 Bad Request")
+        form, _ = request.form()
+        auth_user = authenticate_user(conn, form.get("email", ""), form.get("password", ""))
+        if not auth_user or auth_user["role"] != "admin":
+            title, body = admin_login_view(errors=["Admin email or password is incorrect."])
+            return response(start_response, title, body, status="401 Unauthorized")
+        session_id = create_session(conn, auth_user["id"])
+        token = make_session_token(session_id)
+        return redirect(start_response, "/admin", [session_cookie_header(token)])
+
     if request.path == "/register/parent" and request.method == "POST":
         if not admin_ready:
             title, body = landing_view(request, False, errors=["Create the first admin account before registering parents."])
@@ -964,6 +1122,24 @@ def app(environ: dict, start_response: Callable):
         )
         if not parent_user:
             title, body = landing_view(request, True, signup_errors=errors)
+            return response(start_response, title, body, status="400 Bad Request")
+        session_id = create_session(conn, parent_user["id"])
+        token = make_session_token(session_id)
+        return redirect(start_response, "/parent", [session_cookie_header(token)])
+
+    if request.path == "/parent/register" and request.method == "POST":
+        if not admin_ready:
+            title, body = landing_view(request, False, errors=["Create the first admin account before registering parents."])
+            return response(start_response, title, body, status="400 Bad Request")
+        form, _ = request.form()
+        parent_user, errors = register_parent_account(
+            conn,
+            form.get("email", ""),
+            form.get("password", ""),
+            form.get("display_name", ""),
+        )
+        if not parent_user:
+            title, body = parent_register_view(errors=errors)
             return response(start_response, title, body, status="400 Bad Request")
         session_id = create_session(conn, parent_user["id"])
         token = make_session_token(session_id)
