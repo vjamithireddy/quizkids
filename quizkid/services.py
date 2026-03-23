@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-import math
+import re
 import sqlite3
+from base64 import urlsafe_b64encode
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Iterable
+from pathlib import Path
+from uuid import uuid4
 
+from .config import UPLOAD_DIR
 from .security import hash_password, new_session_id
 
 
@@ -18,10 +21,65 @@ SUPPORTED_MIME_TYPES = {
 
 TEXT_MIME_TYPES = {"text/plain"}
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def utcnow() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
+
+
+def normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def has_admin_account(conn: sqlite3.Connection) -> bool:
+    return conn.execute("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1").fetchone() is not None
+
+
+def count_users_by_role(conn: sqlite3.Connection, role: str) -> int:
+    return conn.execute("SELECT COUNT(*) FROM users WHERE role = ?", (role,)).fetchone()[0]
+
+
+def validate_account_input(email: str, password: str, display_name: str) -> list[str]:
+    errors: list[str] = []
+    if not EMAIL_RE.match(normalize_email(email)):
+        errors.append("Enter a valid email address.")
+    if len(password) < 10:
+        errors.append("Password must be at least 10 characters long.")
+    if display_name.strip() == "":
+        errors.append("Display name is required.")
+    return errors
+
+
+def create_user(conn: sqlite3.Connection, email: str, password: str, role: str, display_name: str) -> tuple[sqlite3.Row | None, list[str]]:
+    errors = validate_account_input(email, password, display_name)
+    if role not in {"admin", "parent"}:
+        errors.append("Unsupported role.")
+    normalized = normalize_email(email)
+    if conn.execute("SELECT 1 FROM users WHERE email = ?", (normalized,)).fetchone():
+        errors.append("An account with that email already exists.")
+    if errors:
+        return None, errors
+    now = utcnow()
+    user_id = conn.execute(
+        """
+        INSERT INTO users (email, password_hash, role, display_name, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (normalized, hash_password(password), role, display_name.strip(), now),
+    ).lastrowid
+    conn.commit()
+    return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone(), []
+
+
+def create_initial_admin(conn: sqlite3.Connection, email: str, password: str, display_name: str) -> tuple[sqlite3.Row | None, list[str]]:
+    if has_admin_account(conn):
+        return None, ["Initial admin setup is already complete."]
+    return create_user(conn, email, password, "admin", display_name)
+
+
+def register_parent_account(conn: sqlite3.Connection, email: str, password: str, display_name: str) -> tuple[sqlite3.Row | None, list[str]]:
+    return create_user(conn, email, password, "parent", display_name)
 
 
 def seed_demo_data(conn: sqlite3.Connection) -> None:
@@ -220,7 +278,7 @@ def seed_demo_data(conn: sqlite3.Connection) -> None:
 def authenticate_user(conn: sqlite3.Connection, email: str, password: str) -> sqlite3.Row | None:
     from .security import verify_password
 
-    user = conn.execute("SELECT * FROM users WHERE email = ?", (email.strip().lower(),)).fetchone()
+    user = conn.execute("SELECT * FROM users WHERE email = ?", (normalize_email(email),)).fetchone()
     if not user:
         return None
     if not verify_password(password, user["password_hash"]):
@@ -322,6 +380,15 @@ def extract_source_text(filename: str, mime_type: str, payload: bytes) -> tuple[
     return note, "stored"
 
 
+def store_material_upload(filename: str, payload: bytes) -> tuple[str, str, int]:
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = Path(filename).suffix
+    stored_filename = f"{uuid4().hex}{suffix}"
+    stored_path = UPLOAD_DIR / stored_filename
+    stored_path.write_bytes(payload)
+    return stored_filename, str(stored_path), len(payload)
+
+
 def _normalize_chunks(source_text: str) -> list[str]:
     chunks = [chunk.strip() for chunk in source_text.replace("\r", "\n").split("\n") if chunk.strip()]
     unique: list[str] = []
@@ -418,13 +485,26 @@ def create_material(conn: sqlite3.Connection, user_id: int, title: str, filename
         return False, notes
 
     source_text, extraction_status = extract_source_text(filename, mime_type, payload)
+    stored_filename, stored_file_path, stored_file_size = store_material_upload(filename, payload)
     material_id = conn.execute(
         """
         INSERT INTO course_materials
-            (title, filename, mime_type, source_text, extraction_status, validation_notes, generation_status, quality_score, uploaded_by, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'processing', 0, ?, ?)
+            (title, filename, stored_filename, stored_file_path, stored_file_size, mime_type, source_text, extraction_status, validation_notes, generation_status, quality_score, uploaded_by, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', 0, ?, ?)
         """,
-        (title.strip() or filename, filename, mime_type, source_text, extraction_status, "Pending checks.", user_id, now),
+        (
+            title.strip() or filename,
+            filename,
+            stored_filename,
+            stored_file_path,
+            stored_file_size,
+            mime_type,
+            source_text,
+            extraction_status,
+            "Pending checks.",
+            user_id,
+            now,
+        ),
     ).lastrowid
     generation_status, quality_score = generate_content_from_material(conn, material_id, title.strip() or filename, source_text)
     validation_notes = (

@@ -1,14 +1,20 @@
 import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 
+from quizkid import services
 from quizkid.db import init_db
 from quizkid.services import (
     choose_questions_for_attempt,
+    create_initial_admin,
     create_material,
     get_attempt_progress,
+    has_admin_account,
     list_topics_for_kid,
     maybe_complete_attempt,
     record_answer,
+    register_parent_account,
     recommend_next_skill,
     seed_demo_data,
     start_quiz_attempt,
@@ -69,6 +75,52 @@ class QuizKidServiceTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertTrue(notes)
         self.assertGreaterEqual(len(topics), 2)
+
+
+class QuizKidProductionSetupTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        init_db(self.conn)
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.original_upload_dir = services.UPLOAD_DIR
+        services.UPLOAD_DIR = Path(self.tempdir.name)
+
+    def tearDown(self) -> None:
+        services.UPLOAD_DIR = self.original_upload_dir
+        self.tempdir.cleanup()
+        self.conn.close()
+
+    def test_initial_admin_can_only_be_created_once(self) -> None:
+        self.assertFalse(has_admin_account(self.conn))
+        admin_user, errors = create_initial_admin(self.conn, "owner@example.com", "supersecure1", "Owner")
+        self.assertIsNotNone(admin_user)
+        self.assertEqual(errors, [])
+        second_admin, second_errors = create_initial_admin(self.conn, "again@example.com", "supersecure1", "Again")
+        self.assertIsNone(second_admin)
+        self.assertIn("already complete", second_errors[0])
+
+    def test_parent_registration_creates_real_account(self) -> None:
+        parent_user, errors = register_parent_account(self.conn, "parent@example.com", "parentpass1", "Parent One")
+        self.assertIsNotNone(parent_user)
+        self.assertEqual(errors, [])
+        stored = self.conn.execute("SELECT * FROM users WHERE email = 'parent@example.com'").fetchone()
+        self.assertEqual(stored["role"], "parent")
+
+    def test_material_upload_is_persisted_to_disk(self) -> None:
+        admin_user, _ = create_initial_admin(self.conn, "owner@example.com", "supersecure1", "Owner")
+        ok, _ = create_material(
+            self.conn,
+            admin_user["id"],
+            "Animals Intro",
+            "animals.txt",
+            "text/plain",
+            b"Mammals feed milk.\nBirds have feathers.\nFish live in water.",
+        )
+        material = self.conn.execute("SELECT * FROM course_materials ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertTrue(ok)
+        self.assertTrue(Path(material["stored_file_path"]).exists())
+        self.assertEqual(material["stored_file_size"], len(b"Mammals feed milk.\nBirds have feathers.\nFish live in water."))
 
 
 if __name__ == "__main__":

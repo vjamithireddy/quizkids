@@ -9,10 +9,12 @@ from typing import Callable
 from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 
+from .config import COOKIE_SECURE, SEED_DEMO_DATA
 from .db import get_connection, init_db
 from .security import SESSION_COOKIE, make_session_token, read_session_token
 from .services import (
     authenticate_user,
+    create_initial_admin,
     create_kid_profile,
     create_material,
     create_session,
@@ -25,11 +27,13 @@ from .services import (
     get_session_user,
     get_topic,
     get_topic_concepts,
+    has_admin_account,
     list_materials,
     list_parent_kids,
     list_topics_for_kid,
     next_question_for_attempt,
     record_answer,
+    register_parent_account,
     seed_demo_data,
     start_quiz_attempt,
     summarize_generation_risk,
@@ -256,6 +260,15 @@ def page(title: str, body: str, user: sqlite3.Row | None = None) -> bytes:
     return markup.encode("utf-8")
 
 
+def session_cookie_header(token: str | None = None, *, clear: bool = False) -> tuple[str, str]:
+    parts = [f"{SESSION_COOKIE}={'' if clear else token or ''}", "HttpOnly", "Path=/", "SameSite=Lax"]
+    if COOKIE_SECURE:
+        parts.append("Secure")
+    if clear:
+        parts.append("Max-Age=0")
+    return ("Set-Cookie", "; ".join(parts))
+
+
 def redirect(start_response: Callable, location: str, headers: list[tuple[str, str]] | None = None) -> list[bytes]:
     response_headers = [("Location", location)]
     if headers:
@@ -291,14 +304,43 @@ def require_user(conn: sqlite3.Connection, request: Request, role: str | None = 
     return user
 
 
-def landing_view(request: Request, flash: str = "") -> tuple[str, str]:
+def landing_view(request: Request, admin_ready: bool, flash: str = "", errors: list[str] | None = None, signup_errors: list[str] | None = None) -> tuple[str, str]:
     flash_html = f"<div class='flash'>{html_escape(flash)}</div>" if flash else ""
+    error_html = "".join(f"<div class='flash error'>{html_escape(err)}</div>" for err in (errors or []))
+    signup_error_html = "".join(f"<div class='flash error'>{html_escape(err)}</div>" for err in (signup_errors or []))
+    if not admin_ready:
+        body = f"""
+        <section class="hero">
+          <span class="tag">First-run setup</span>
+          <h1>Create the first QuizKid admin account.</h1>
+          <p>QuizKid no longer boots with demo credentials in production mode. Create the initial admin account to unlock the admin console and invite real parents.</p>
+          {flash_html}
+          {error_html}
+          <div class="grid">
+            <div class="panel">
+              <h2>Admin Setup</h2>
+              <form method="post" action="/setup/admin">
+                <label>Display Name <input name="display_name" required></label>
+                <label>Email <input name="email" type="email" required></label>
+                <label>Password <input name="password" type="password" minlength="10" required></label>
+                <button type="submit">Create Admin</button>
+              </form>
+            </div>
+            <div class="panel">
+              <h2>What happens next</h2>
+              <p>The first admin can sign in immediately, upload course material, and onboard real parent accounts.</p>
+            </div>
+          </div>
+        </section>
+        """
+        return "QuizKid Setup", body
     body = f"""
     <section class="hero">
       <span class="tag">Adaptive learning on a single VPS</span>
       <h1>QuizKid turns study material into guided quiz adventures.</h1>
       <p>Admins upload source material, parents manage child profiles, and kids learn through hints, explanations, retries, and topic mastery.</p>
       {flash_html}
+      {error_html}
       <div class="grid">
         <div class="panel">
           <h2>Sign In</h2>
@@ -309,10 +351,15 @@ def landing_view(request: Request, flash: str = "") -> tuple[str, str]:
           </form>
         </div>
         <div class="panel">
-          <h2>Demo Accounts</h2>
-          <p><strong>Admin</strong><br>admin@quizkid.local / admin123</p>
-          <p><strong>Parent</strong><br>parent@quizkid.local / parent123</p>
-          <p class="muted">The starter app seeds one parent and one kid profile so you can walk the main flows immediately.</p>
+          <h2>Parent Registration</h2>
+          {signup_error_html}
+          <form method="post" action="/register/parent">
+            <label>Display Name <input name="display_name" required></label>
+            <label>Email <input name="email" type="email" required></label>
+            <label>Password <input name="password" type="password" minlength="10" required></label>
+            <button type="submit">Create Parent Account</button>
+          </form>
+          <p class="muted">Parents can register themselves, then create kid profiles and track topic mastery.</p>
         </div>
       </div>
     </section>
@@ -330,6 +377,7 @@ def admin_dashboard(conn: sqlite3.Connection, user: sqlite3.Row, flash: str = ""
             "<tr>"
             f"<td>{html_escape(material['title'])}</td>"
             f"<td>{html_escape(material['filename'])}</td>"
+            f"<td>{html_escape(material['stored_filename'] or '-')}</td>"
             f"<td>{html_escape(material['generation_status'])}</td>"
             f"<td>{material['quality_score']:.2f}</td>"
             f"<td>{html_escape(summarize_generation_risk(material))}</td>"
@@ -357,8 +405,8 @@ def admin_dashboard(conn: sqlite3.Connection, user: sqlite3.Row, flash: str = ""
       <section class="panel">
         <h2>Generated Materials</h2>
         <table>
-          <thead><tr><th>Title</th><th>File</th><th>Status</th><th>Quality</th><th>Risk</th><th>Notes</th></tr></thead>
-          <tbody>{''.join(rows) or '<tr><td colspan=\"6\">No materials uploaded yet.</td></tr>'}</tbody>
+          <thead><tr><th>Title</th><th>Original File</th><th>Stored File</th><th>Status</th><th>Quality</th><th>Risk</th><th>Notes</th></tr></thead>
+          <tbody>{''.join(rows) or '<tr><td colspan=\"7\">No materials uploaded yet.</td></tr>'}</tbody>
         </table>
       </section>
     </div>
@@ -577,8 +625,10 @@ def quiz_run_view(conn: sqlite3.Connection, kid: sqlite3.Row, attempt: sqlite3.R
 def app(environ: dict, start_response: Callable):
     conn = get_connection()
     init_db(conn)
-    seed_demo_data(conn)
+    if SEED_DEMO_DATA:
+        seed_demo_data(conn)
     request = Request(environ)
+    admin_ready = has_admin_account(conn)
     user = current_user(conn, request)
 
     if request.path == "/health" and request.method == "GET":
@@ -586,20 +636,56 @@ def app(environ: dict, start_response: Callable):
         return [b"ok"]
 
     if request.path == "/" and request.method == "GET":
-        title, body = landing_view(request)
+        title, body = landing_view(request, admin_ready)
         return response(start_response, title, body, user)
 
+    if request.path == "/setup/admin" and request.method == "POST":
+        form, _ = request.form()
+        new_admin, errors = create_initial_admin(
+            conn,
+            form.get("email", ""),
+            form.get("password", ""),
+            form.get("display_name", ""),
+        )
+        if not new_admin:
+            title, body = landing_view(request, has_admin_account(conn), errors=errors)
+            return response(start_response, title, body, status="400 Bad Request")
+        session_id = create_session(conn, new_admin["id"])
+        token = make_session_token(session_id)
+        return redirect(start_response, "/admin", [session_cookie_header(token)])
+
     if request.path == "/login" and request.method == "POST":
+        if not admin_ready:
+            title, body = landing_view(request, False, errors=["Create the first admin account before signing in."])
+            return response(start_response, title, body, status="400 Bad Request")
         form, _ = request.form()
         auth_user = authenticate_user(conn, form.get("email", ""), form.get("password", ""))
         if not auth_user:
-            title, body = landing_view(request, "Invalid email or password.")
+            title, body = landing_view(request, admin_ready, "Invalid email or password.")
             return response(start_response, title, body, status="401 Unauthorized")
         session_id = create_session(conn, auth_user["id"])
         token = make_session_token(session_id)
-        headers = [("Set-Cookie", f"{SESSION_COOKIE}={token}; HttpOnly; Path=/; SameSite=Lax")]
+        headers = [session_cookie_header(token)]
         location = "/admin" if auth_user["role"] == "admin" else "/parent"
         return redirect(start_response, location, headers)
+
+    if request.path == "/register/parent" and request.method == "POST":
+        if not admin_ready:
+            title, body = landing_view(request, False, errors=["Create the first admin account before registering parents."])
+            return response(start_response, title, body, status="400 Bad Request")
+        form, _ = request.form()
+        parent_user, errors = register_parent_account(
+            conn,
+            form.get("email", ""),
+            form.get("password", ""),
+            form.get("display_name", ""),
+        )
+        if not parent_user:
+            title, body = landing_view(request, True, signup_errors=errors)
+            return response(start_response, title, body, status="400 Bad Request")
+        session_id = create_session(conn, parent_user["id"])
+        token = make_session_token(session_id)
+        return redirect(start_response, "/parent", [session_cookie_header(token)])
 
     if request.path == "/logout" and request.method == "POST":
         cookie = request.cookies.get(SESSION_COOKIE)
@@ -607,7 +693,7 @@ def app(environ: dict, start_response: Callable):
             session_id = read_session_token(cookie.value)
             if session_id:
                 destroy_session(conn, session_id)
-        headers = [("Set-Cookie", f"{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")]
+        headers = [session_cookie_header(clear=True)]
         return redirect(start_response, "/", headers)
 
     if request.path == "/admin" and request.method == "GET":

@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
+
+from .config import DB_PATH
 
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "quizkid.sqlite3"
-
-
-def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
+def get_connection(db_path=None) -> sqlite3.Connection:
     path = db_path or DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
@@ -47,6 +45,9 @@ CREATE TABLE IF NOT EXISTS course_materials (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
     filename TEXT NOT NULL,
+    stored_filename TEXT,
+    stored_file_path TEXT,
+    stored_file_size INTEGER NOT NULL DEFAULT 0,
     mime_type TEXT NOT NULL,
     source_text TEXT NOT NULL,
     extraction_status TEXT NOT NULL,
@@ -139,4 +140,13 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    ensure_column(conn, "course_materials", "stored_filename", "TEXT")
+    ensure_column(conn, "course_materials", "stored_file_path", "TEXT")
+    ensure_column(conn, "course_materials", "stored_file_size", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()
+
+
+def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    if column_name not in columns:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")

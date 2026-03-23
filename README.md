@@ -1,7 +1,8 @@
 # QuizKid
 
-QuizKid is a Python-first starter implementation of the product plan for a kids quiz and learning application. It includes:
+QuizKid is a Python-first implementation of the product plan for a kids quiz and learning application. It includes:
 
+- real first-run admin setup and parent registration
 - role-based web experience for `admin` and `parent`
 - parent-managed `kid` profiles
 - guided topic learning paths with adaptive difficulty
@@ -14,6 +15,7 @@ This repository is intentionally dependency-light so it can run on a simple Host
 ## What is implemented
 
 - `Admin console`
+  - first-run admin creation instead of hardcoded production credentials
   - sign in as seeded admin
   - upload course material through a simple file form
   - validate uploads
@@ -37,6 +39,11 @@ This repository is intentionally dependency-light so it can run on a simple Host
   - role checks
   - admin audit logging
 
+## Startup modes
+
+- Production/default: no demo users are created automatically. The first request shows an admin setup screen.
+- Demo mode: set `QUIZKID_SEED_DEMO=1` to seed sample admin and parent accounts for local walkthroughs.
+
 ## What is intentionally simplified
 
 - PDF and DOC ingestion is scaffolded, but deep parsing is limited without external libraries.
@@ -45,6 +52,7 @@ This repository is intentionally dependency-light so it can run on a simple Host
 
 ## Demo credentials
 
+Available only when `QUIZKID_SEED_DEMO=1`:
 - Admin: `admin@quizkid.local` / `admin123`
 - Parent: `parent@quizkid.local` / `parent123`
 
