@@ -796,6 +796,28 @@ def parent_dashboard(conn: sqlite3.Connection, user: sqlite3.Row, flash: str = "
     mastery_rows = get_mastery_rows_for_parent(conn, user["id"])
     flash_html = f"<div class='flash'>{html_escape(flash)}</div>" if flash else ""
     error_html = "".join(f"<div class='flash error'>{html_escape(err)}</div>" for err in (errors or []))
+    available_courses_html = "".join(
+        f"<li>{html_escape(course['title'])} ({course['approved_topic_count']} approved topics)</li>"
+        for course in courses
+    ) or "<li>No course is ready for parents yet.</li>"
+    if courses:
+        if kids:
+            course_status_html = (
+                "<p>These courses are ready to assign.</p>"
+                f"<ul>{available_courses_html}</ul>"
+                "<p class='muted'>Open a kid card below and use the course checkboxes to assign one or more courses.</p>"
+            )
+        else:
+            course_status_html = (
+                "<p>These courses are ready to assign.</p>"
+                f"<ul>{available_courses_html}</ul>"
+                "<p class='muted'>Create a kid profile first. The course assignment controls will appear in that kid's card right after creation.</p>"
+            )
+    else:
+        course_status_html = (
+            "<p>No assignable courses are available yet.</p>"
+            "<p class='muted'>An admin must upload course material and approve the generated topic before parents can assign it here.</p>"
+        )
     kid_cards = []
     for kid in kids:
         attempts = get_recent_attempts(conn, kid["id"])
@@ -871,6 +893,12 @@ def parent_dashboard(conn: sqlite3.Connection, user: sqlite3.Row, flash: str = "
         <p class="muted">After creation, assign a course below so the kid sees the correct learning path.</p>
       </section>
       <section class="panel">
+        <h2>Available Courses</h2>
+        {course_status_html}
+      </section>
+    </div>
+    <div class="grid">
+      <section class="panel">
         <h2>Topic Mastery</h2>
         <table>
           <thead><tr><th>Kid</th><th>Course</th><th>Chapter</th><th>Topic</th><th>Mastery</th><th>Attempts</th></tr></thead>
@@ -878,7 +906,7 @@ def parent_dashboard(conn: sqlite3.Connection, user: sqlite3.Row, flash: str = "
         </table>
       </section>
     </div>
-    <div class="grid">{''.join(kid_cards) or '<section class=\"panel\"><p>No kid profiles yet.</p></section>'}</div>
+    <div class="grid">{''.join(kid_cards) or '<section class=\"panel\"><h2>No kid profiles yet</h2><p>Create the first kid profile above. Course assignment will appear inside each kid card.</p></section>'}</div>
     """
     return "Parent Dashboard", body
 
